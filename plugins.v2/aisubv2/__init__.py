@@ -58,6 +58,22 @@ class TaskItem:
     complete_time: datetime = None
 
 
+# 任务来源在界面上的展示文案
+TASK_SOURCE_LABELS = {
+    TaskSource.MANUAL: "手动添加",
+    TaskSource.EVENT: "入库触发",
+}
+
+# 任务状态在界面上的展示文案与样式类
+TASK_STATUS_META = {
+    TaskStatus.PENDING: ("等待中", "text-info"),
+    TaskStatus.IN_PROGRESS: ("处理中", "text-warning"),
+    TaskStatus.COMPLETED: ("已完成", "text-success"),
+    TaskStatus.IGNORED: ("已忽略", "text-muted"),
+    TaskStatus.FAILED: ("失败", "text-error"),
+}
+
+
 class AiSubV2(_PluginBase):
     # 插件名称
     plugin_name = "AI字幕自动生成(AiSub v2)"
@@ -68,7 +84,7 @@ class AiSubV2(_PluginBase):
     # 主题色
     plugin_color = "#2C4F7E"
     # 插件版本
-    plugin_version = "2.4"
+    plugin_version = "2.5"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -1077,7 +1093,9 @@ class AiSubV2(_PluginBase):
                                             'label': '媒体路径',
                                             'rows': 3,
                                             'placeholder': '绝对路径，每行一个。支持文件和文件夹'
-                                        }
+                                        },
+                                        # 供 Vue 配置页识别：在该输入框旁渲染“选择文件”按钮
+                                        'picker': 'path_list'
                                     }
                                 ]
                             }
@@ -1443,60 +1461,101 @@ class AiSubV2(_PluginBase):
         }
 
     def get_api(self) -> List[Dict[str, Any]]:
-        pass
+        """
+        注册 Vue 数据页所需的插件 API。
+        """
+        return [
+            {
+                "path": "/tasks",
+                "endpoint": self.get_tasks_api,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "获取字幕任务列表",
+                "description": "返回任务列表、状态统计与运行状态，供插件数据页展示。",
+            }
+        ]
 
-    def get_page(self) -> List[dict]:
-        # 加载任务并按添加时间倒序排列
-        tasks: Dict[str, TaskItem] = self.load_tasks()
-        sorted_tasks = sorted(
-            tasks.items(),
-            key=lambda x: x[1].add_time,
-            reverse=True
-        )
+    @staticmethod
+    def get_render_mode() -> Tuple[str, str]:
+        """
+        声明配置页与数据页使用 Vue 联邦组件渲染。
+        :return: 渲染模式与编译产物目录，前端通过 dist/assets/remoteEntry.js 加载组件
+        """
+        return "vue", "dist/assets"
 
-        status_classes = {
-            TaskStatus.PENDING: "text-info",
-            TaskStatus.IN_PROGRESS: "text-warning",
-            TaskStatus.COMPLETED: "text-success",
-            TaskStatus.IGNORED: "text-muted",
-            TaskStatus.FAILED: "text-error"
+    def _task_rows(self) -> List[Dict[str, Any]]:
+        """
+        组装任务列表数据（按添加时间倒序），供 JSON 数据页与 Vue 数据页共用。
+        """
+        tasks: Dict[str, TaskItem] = self._tasks if self._tasks is not None else self.load_tasks()
+        sorted_tasks = sorted(tasks.items(), key=lambda x: x[1].add_time, reverse=True)
+        rows: List[Dict[str, Any]] = []
+        for _, task in sorted_tasks:
+            status_text, status_class = TASK_STATUS_META.get(
+                task.status, (str(task.status), "")
+            )
+            source = task.source.value if isinstance(task.source, TaskSource) else str(task.source)
+            status = task.status.value if isinstance(task.status, TaskStatus) else str(task.status)
+            rows.append({
+                "task_id": task.task_id,
+                "video_file": task.video_file,
+                "source": source,
+                "source_label": TASK_SOURCE_LABELS.get(task.source, source),
+                "status": status,
+                "status_text": status_text,
+                "status_class": status_class,
+                "add_time": task.add_time.strftime("%Y-%m-%d %H:%M:%S") if task.add_time else "-",
+                "complete_time": task.complete_time.strftime("%Y-%m-%d %H:%M:%S")
+                if task.complete_time else "-",
+            })
+        return rows
+
+    @staticmethod
+    def _task_summary(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+        """
+        统计各状态的任务数量，供前端展示汇总信息。
+        """
+        summary: Dict[str, int] = {"total": len(rows)}
+        for status in TaskStatus:
+            summary[status.value] = 0
+        for row in rows:
+            key = row.get("status")
+            if key in summary:
+                summary[key] += 1
+        return summary
+
+    def get_tasks_api(self) -> Dict[str, Any]:
+        """
+        Vue 数据页使用的任务列表接口。
+        """
+        rows = self._task_rows()
+        return {
+            "success": True,
+            "data": {
+                "tasks": rows,
+                "summary": self._task_summary(rows),
+                "running": bool(self._running),
+            },
         }
 
+    def get_page(self) -> List[dict]:
+        """
+        JSON 数据页，作为不支持 Vue 联邦渲染的旧版本 MoviePilot 的回退页面。
+        """
         rows = []
-        for task_id, task in sorted_tasks:
-            source_label = {
-                TaskSource.MANUAL: "手动添加",
-                TaskSource.EVENT: "入库触发"
-            }.get(task.source, task.source)
-
-            status_text = {
-                TaskStatus.PENDING: "等待中",
-                TaskStatus.IN_PROGRESS: "处理中",
-                TaskStatus.COMPLETED: "已完成",
-                TaskStatus.IGNORED: "已忽略",
-                TaskStatus.FAILED: "失败"
-            }.get(task.status, task.status)
-
-            status_class = status_classes.get(task.status, "")
-
-            add_time_str = task.add_time.strftime("%Y-%m-%d %H:%M:%S")
-            complete_time_str = (
-                task.complete_time.strftime("%Y-%m-%d %H:%M:%S")
-                if task.complete_time else "-"
-            )
-
+        for row in self._task_rows():
             rows.append({
                 "component": "tr",
                 "props": {"class": "text-sm"},
                 "content": [
-                    {"component": "td", "text": add_time_str},
-                    {"component": "td", "text": task.video_file},
-                    {"component": "td", "text": source_label},
-                    {"component": "td", "text": complete_time_str},
+                    {"component": "td", "text": row["add_time"]},
+                    {"component": "td", "text": row["video_file"]},
+                    {"component": "td", "text": row["source_label"]},
+                    {"component": "td", "text": row["complete_time"]},
                     {
                         "component": "td",
-                        "props": {"class": status_class},
-                        "text": status_text
+                        "props": {"class": row["status_class"]},
+                        "text": row["status_text"]
                     },
                 ],
             })

@@ -1,0 +1,21 @@
+
+.aisub-page[data-v-5b129cec] {
+  background: rgb(var(--v-theme-background));
+}
+.aisub-page-shell[data-v-5b129cec] {
+  padding: 18px;
+}
+.aisub-summary[data-v-5b129cec] {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.aisub-empty[data-v-5b129cec] {
+  padding: 40px 16px;
+  text-align: center;
+}
+.aisub-task-file[data-v-5b129cec] {
+  max-width: 420px;
+  overflow-wrap: anywhere;
+}

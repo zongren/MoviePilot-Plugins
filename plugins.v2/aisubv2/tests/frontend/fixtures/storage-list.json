@@ -1,0 +1,62 @@
+[
+  {
+    "type": "dir",
+    "name": "Movies",
+    "basename": "Movies",
+    "path": "/medias/Movies",
+    "storage": "local",
+    "size": 0,
+    "modify_time": 1750000000.0,
+    "children": []
+  },
+  {
+    "type": "dir",
+    "name": "TV",
+    "basename": "TV",
+    "path": "/medias/TV",
+    "storage": "local",
+    "size": 0,
+    "modify_time": 1750000100.0,
+    "children": []
+  },
+  {
+    "type": "file",
+    "name": "movie.mkv",
+    "basename": "movie",
+    "extension": "mkv",
+    "path": "/medias/movie.mkv",
+    "storage": "local",
+    "size": 1610612736,
+    "modify_time": 1750000200.0
+  },
+  {
+    "type": "file",
+    "name": "clip.mp4",
+    "basename": "clip",
+    "extension": "mp4",
+    "path": "/medias/clip.mp4",
+    "storage": "local",
+    "size": 104857600,
+    "modify_time": 1750000300.0
+  },
+  {
+    "type": "file",
+    "name": "notes.txt",
+    "basename": "notes",
+    "extension": "txt",
+    "path": "/medias/notes.txt",
+    "storage": "local",
+    "size": 1024,
+    "modify_time": 1750000400.0
+  },
+  {
+    "type": "file",
+    "name": "subtitle.srt",
+    "basename": "subtitle",
+    "extension": "srt",
+    "path": "/medias/subtitle.srt",
+    "storage": "local",
+    "size": 4096,
+    "modify_time": 1750000500.0
+  }
+]

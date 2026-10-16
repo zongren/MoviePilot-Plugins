@@ -1,0 +1,83 @@
+
+.aisub-picker-row[data-v-8ffe9390] {
+  align-items: flex-start;
+  display: flex;
+  gap: 8px;
+}
+.aisub-picker-input[data-v-8ffe9390] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.aisub-picker-button[data-v-8ffe9390] {
+  flex: 0 0 auto;
+  margin-top: 4px;
+}
+@media (max-width: 600px) {
+.aisub-picker-row[data-v-8ffe9390] {
+    flex-direction: column;
+}
+.aisub-picker-button[data-v-8ffe9390] {
+    width: 100%;
+}
+}
+
+.aisub-picker-toolbar[data-v-2a2d0b7f] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.aisub-picker-nav[data-v-2a2d0b7f] {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
+.aisub-storage-select[data-v-2a2d0b7f] {
+  max-width: 220px;
+}
+.aisub-picker-crumbs[data-v-2a2d0b7f] {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.aisub-picker-filters[data-v-2a2d0b7f] {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.aisub-keyword[data-v-2a2d0b7f] {
+  max-width: 320px;
+}
+.aisub-picker-list[data-v-2a2d0b7f] {
+  max-height: 55vh;
+  min-height: 180px;
+  overflow: auto;
+}
+.aisub-picker-empty[data-v-2a2d0b7f] {
+  padding: 40px 16px;
+  text-align: center;
+}
+.aisub-entry-name[data-v-2a2d0b7f] {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 6px;
+}
+.aisub-picker-actions[data-v-2a2d0b7f] {
+  gap: 8px;
+}
+
+.aisub-config[data-v-d8ca43db] {
+  background: rgb(var(--v-theme-background));
+}
+.aisub-config-shell[data-v-d8ca43db] {
+  padding: 18px;
+}
+.aisub-config-footer[data-v-d8ca43db] {
+  align-items: center;
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  display: flex;
+  gap: 10px;
+  padding-top: 16px;
+}

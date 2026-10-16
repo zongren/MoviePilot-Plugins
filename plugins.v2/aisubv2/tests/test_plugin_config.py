@@ -3,14 +3,20 @@
 The plugin module (``plugins.v2/aisubv2/__init__.py``) imports MoviePilot and a
 few optional third-party packages.  None of them are installed in this
 environment, so we install lightweight stubs into :data:`sys.modules` *before*
-importing the plugin and then exercise the v2.4 configuration surface.
+importing the plugin and then exercise the v2.5 configuration surface.
 
 The MoviePilot ``get_config`` stub intentionally raises ``AssertionError`` for
 the ``"ChatGPT"`` key: the plugin no longer depends on the central ChatGPT
 configuration and asking for it must fail loudly.
+
+v2.5 moves the settings/data pages to MoviePilot's Vue federation rendering, so
+the tests additionally pin the render mode, the shipped ``dist/assets`` build
+artifacts and the ``/tasks`` plugin API.
 """
 
+import json
 import pathlib
+import queue
 import shutil
 import sys
 import tempfile
@@ -259,8 +265,8 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         self.plugin = plugin_module.AiSubV2()
 
     # -- 1. version -------------------------------------------------------
-    def test_plugin_version_is_2_4(self):
-        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.4")
+    def test_plugin_version_is_2_5(self):
+        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.5")
 
     # -- 2. defaults + removed keys --------------------------------------
     def test_get_form_defaults_and_removed_keys(self):
@@ -475,6 +481,122 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         # resolve it to ``plugins/aisubv2`` (v1 root) and 404.
         index_v1 = json.loads((REPO / "package.json").read_text(encoding="utf-8"))
         self.assertNotIn("AiSubV2", index_v1)
+
+    # -- 11. Vue federation rendering contract ----------------------------
+    def test_render_mode_uses_vue_federation(self):
+        """配置页/数据页必须声明 Vue 联邦渲染，并随包分发编译产物。"""
+        self.assertEqual(
+            plugin_module.AiSubV2.get_render_mode(),
+            ("vue", "dist/assets"),
+        )
+
+        plugin_dir = REPO / "plugins.v2" / plugin_module.AiSubV2.__name__.lower()
+        remote_entry = plugin_dir / "dist" / "assets" / "remoteEntry.js"
+        self.assertTrue(
+            remote_entry.is_file(),
+            f"缺少前端联邦产物 {remote_entry}，需要先执行 npm run build",
+        )
+
+        remote_source = remote_entry.read_text(encoding="utf-8")
+        for expose in ("./Config", "./Page"):
+            self.assertIn(expose, remote_source, f"remoteEntry.js 未暴露 {expose}")
+
+        # 暴露的组件文件必须真实存在，否则宿主加载时会 404
+        for asset in ("__federation_expose_Config", "__federation_expose_Page"):
+            matches = list((plugin_dir / "dist" / "assets").glob(f"{asset}-*.js"))
+            self.assertTrue(matches, f"dist/assets 缺少 {asset} 产物")
+
+    def test_frontend_build_project_exposes_required_components(self):
+        """前端构建工程需保留 Vue 侧源码与联邦 exposes 配置。"""
+        plugin_dir = REPO / "plugins.v2" / plugin_module.AiSubV2.__name__.lower()
+
+        vite_config = (plugin_dir / "vite.config.js").read_text(encoding="utf-8")
+        self.assertIn("'./Config'", vite_config)
+        self.assertIn("'./Page'", vite_config)
+        self.assertIn("remoteEntry.js", vite_config)
+
+        for relative in (
+            "src/components/Config.vue",
+            "src/components/Page.vue",
+            "src/components/FilePickerDialog.vue",
+            "src/components/JsonFormNode.vue",
+        ):
+            self.assertTrue((plugin_dir / relative).is_file(), f"缺少前端源码 {relative}")
+
+    # -- 12. picker marker + /tasks API -----------------------------------
+    def test_path_list_field_is_marked_for_file_picker(self):
+        """媒体路径输入框需要带 picker 标记，Vue 配置页据此渲染选择按钮。"""
+        schema, _defaults = self.plugin.get_form()
+        marked = []
+
+        def walk(node):
+            if isinstance(node, dict):
+                props = node.get("props")
+                if isinstance(props, dict) and props.get("model") == "path_list":
+                    marked.append(node.get("picker"))
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        walk(schema)
+        self.assertEqual(marked, ["path_list"], "path_list 输入框应且仅应带一个 picker 标记")
+
+    def test_get_api_registers_bear_tasks_route(self):
+        """Vue 数据页需要一个 bear 鉴权的任务查询接口。"""
+        routes = self.plugin.get_api()
+        self.assertIsInstance(routes, list)
+        self.assertEqual(len(routes), 1)
+
+        route = routes[0]
+        self.assertEqual(route["path"], "/tasks")
+        self.assertEqual(route["methods"], ["GET"])
+        self.assertEqual(route["auth"], "bear")
+        self.assertTrue(callable(route["endpoint"]))
+
+    def test_tasks_api_payload_serializes_queue(self):
+        """任务接口返回前端表格所需的字段与状态统计。"""
+        self.plugin._tasks = {}
+        self.plugin._task_queue = queue.Queue()
+        self.assertTrue(
+            self.plugin.add_task("/media/movie/a.mkv", plugin_module.TaskSource.MANUAL)
+        )
+        self.assertTrue(
+            self.plugin.add_task("/media/movie/b.mkv", plugin_module.TaskSource.EVENT)
+        )
+
+        payload = self.plugin.get_tasks_api()
+        self.assertTrue(payload["success"])
+        data = payload["data"]
+        self.assertFalse(data["running"])
+
+        tasks = data["tasks"]
+        self.assertEqual(len(tasks), 2)
+        by_file = {task["video_file"]: task for task in tasks}
+        self.assertEqual(by_file["/media/movie/a.mkv"]["source_label"], "手动添加")
+        self.assertEqual(by_file["/media/movie/b.mkv"]["source_label"], "入库触发")
+        for task in tasks:
+            self.assertEqual(task["status"], "pending")
+            self.assertEqual(task["status_text"], "等待中")
+            self.assertEqual(task["complete_time"], "-")
+            self.assertEqual(task["status_class"], "text-info")
+
+        summary = data["summary"]
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["pending"], 2)
+        for status in ("in_progress", "completed", "ignored", "failed"):
+            self.assertEqual(summary[status], 0)
+
+    def test_json_page_fallback_remains_available(self):
+        """旧版本 MoviePilot 仍会走 JSON 数据页，需保持可用。"""
+        self.plugin._tasks = {}
+        self.plugin._task_queue = queue.Queue()
+        self.plugin.add_task("/media/movie/a.mkv", plugin_module.TaskSource.MANUAL)
+
+        page = self.plugin.get_page()
+        self.assertIsInstance(page, list)
+        self.assertTrue(page)
 
 
 if __name__ == "__main__":

@@ -163,3 +163,10 @@ cache
 test
 .vscode
 my_openai.py
+
+# Node / 前端构建
+node_modules/
+
+# Vue 联邦插件的前端编译产物需要随插件一起分发
+!plugins.v2/aisubv2/dist/
+!plugins.v2/aisubv2/dist/**
