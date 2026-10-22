@@ -3,7 +3,7 @@
         "name": "AI字幕自动生成(AiSub v2)",
         "description": "使用whisper自动生成视频文件字幕,使用大模型翻译字幕成中文。",
         "labels": "字幕",
-        "version": "2.5",
+        "version": "2.6",
         "icon": "autosubtitles.jpeg",
         "author": "TimoYoung",
         "level": 1,
@@ -18,7 +18,8 @@
           "v2.2": "fix",
           "v2.3": "1.整文件按字幕序号翻译，时间轴原样保留 2.独立大模型配置，支持 OpenAI Chat Completions / Responses / Anthropic Messages 3.新增仅输出中文、已存在中文字幕跳过 4.移除批量/上下文/合并等旧配置",
           "v2.4": "1.插件更名为 AiSubV2 2.适配 MoviePilot V2 插件目录 plugins.v2/aisubv2 3.修复依赖预检冲突（移除未使用的 python-dotenv，放宽依赖版本约束）",
-          "v2.5": "1.配置页/数据页改用 MoviePilot Vue 联邦渲染 2.媒体路径输入框旁新增“选择文件”按钮，支持在文件管理器中浏览并多选视频文件/文件夹 3.新增 /tasks 插件接口供数据页读取任务状态"
+          "v2.5": "1.配置页/数据页改用 MoviePilot Vue 联邦渲染 2.媒体路径输入框旁新增“选择文件”按钮，支持在文件管理器中浏览并多选视频文件/文件夹 3.新增 /tasks 插件接口供数据页读取任务状态",
+          "v2.6": "1.手动执行时忽略“已存在字幕”检查，已存在插件生成的机翻字幕会强制重新生成并覆盖 2.修复外挂字幕文件名缺少语言标记（如 xxx.srt）时 iso639 解析空字符抛 ValueError 导致任务失败的问题"
         }
       },
       "MediaSyncGuard": {

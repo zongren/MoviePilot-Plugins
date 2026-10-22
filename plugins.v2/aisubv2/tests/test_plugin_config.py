@@ -12,6 +12,11 @@ configuration and asking for it must fail loudly.
 v2.5 moves the settings/data pages to MoviePilot's Vue federation rendering, so
 the tests additionally pin the render mode, the shipped ``dist/assets`` build
 artifacts and the ``/tasks`` plugin API.
+
+v2.6 adds regression coverage for the task runtime: manual (user triggered)
+tasks force regeneration/overwrite of previously generated machine-translated
+subtitles, and sidecar subtitle file names without a usable language tag must
+not raise ``ValueError`` inside the iso639 lookup.
 """
 
 import json
@@ -20,6 +25,7 @@ import queue
 import shutil
 import sys
 import tempfile
+import threading
 import types
 import unittest
 
@@ -265,8 +271,8 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         self.plugin = plugin_module.AiSubV2()
 
     # -- 1. version -------------------------------------------------------
-    def test_plugin_version_is_2_5(self):
-        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.5")
+    def test_plugin_version_is_2_6(self):
+        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.6")
 
     # -- 2. defaults + removed keys --------------------------------------
     def test_get_form_defaults_and_removed_keys(self):
@@ -597,6 +603,261 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         page = self.plugin.get_page()
         self.assertIsInstance(page, list)
         self.assertTrue(page)
+
+
+class _RealisticIso639:
+    """``iso639`` stand-in that mirrors the real library's error behaviour.
+
+    The real ``iso639.to_iso639_1`` raises ``ValueError('Invalid search
+    criteria.')`` for empty keys (e.g. a sidecar file named ``Movie.srt``) and
+    ``NonExistentLanguageError`` for unknown ones.  Neither may escape a
+    subtitle task.
+    """
+
+    class NonExistentLanguageError(RuntimeError):
+        pass
+
+    _CODES = {
+        "en": "en",
+        "eng": "en",
+        "english": "en",
+        "zh": "zh",
+        "chi": "zh",
+        "zho": "zh",
+        "chinese": "zh",
+        "de": "de",
+        "ger": "de",
+        "deu": "de",
+        "ja": "ja",
+        "jpn": "ja",
+        "und": "",  # real library: language without a two-letter code
+    }
+
+    @classmethod
+    def to_iso639_1(cls, key):
+        if not key:
+            raise ValueError("Invalid search criteria.")
+        code = cls._CODES.get(str(key).strip().lower())
+        if code is None:
+            raise cls.NonExistentLanguageError("Language does not exist.")
+        return code
+
+
+class AiSubV2LanguageParsingTest(unittest.TestCase):
+    """v2.6 regression: sidecar names must never crash the language parser."""
+
+    def setUp(self):
+        LOG_RECORDS.clear()
+        self._original_iso639 = plugin_module.iso639
+        plugin_module.iso639 = _RealisticIso639
+        self.addCleanup(self._restore_iso639)
+        self.tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="aisubv2-sidecar-"))
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+
+    def _restore_iso639(self):
+        plugin_module.iso639 = self._original_iso639
+
+    def _video(self, name="校园大逃杀2：篝火行动 (2026) - 2160p.mkv"):
+        path = self.tmpdir / name
+        path.write_bytes(b"video")
+        return str(path)
+
+    def _sidecar(self, video, suffix):
+        video_path = pathlib.Path(video)
+        sidecar = video_path.with_name(video_path.stem + suffix)
+        sidecar.write_text("1\n00:00:00,000 --> 00:00:01,000\nhello\n", encoding="utf-8")
+        return sidecar
+
+    @staticmethod
+    def _match(video, prefer_langs, **kwargs):
+        return plugin_module.AiSubV2._AiSubV2__external_subtitle_exists(
+            video, prefer_langs, only_srt=True, strict=False, **kwargs
+        )
+
+    def test_untagged_sidecar_does_not_raise_and_is_ignored(self):
+        """文件名缺少语言标记（如 ``影片.mkv`` 旁的 ``影片.srt``）不应再抛 ValueError。"""
+        video = self._video()
+        self._sidecar(video, ".srt")
+        exists, lang, name = self._match(video, ["en", "eng"])
+        self.assertFalse(exists)
+        self.assertIsNone(lang)
+        self.assertIsNone(name)
+
+    def test_untagged_sidecar_does_not_block_tagged_one(self):
+        video = self._video()
+        self._sidecar(video, ".srt")
+        tagged = self._sidecar(video, ".eng.srt")
+        exists, lang, name = self._match(video, ["en", "eng"])
+        self.assertTrue(exists)
+        self.assertEqual(lang, "en")
+        self.assertEqual(name, tagged.name)
+
+    def test_sidecar_with_empty_props_segment_is_ignored(self):
+        video = self._video()
+        self._sidecar(video, "..srt")
+        exists, _, _ = self._match(video, ["en", "eng"])
+        self.assertFalse(exists)
+
+    def test_non_language_sidecar_props_are_ignored(self):
+        video = self._video()
+        self._sidecar(video, ".2160p.srt")
+        exists, _, _ = self._match(video, ["en", "eng"])
+        self.assertFalse(exists)
+
+    def test_generated_translation_is_excluded_as_source(self):
+        """插件自己生成的机翻字幕不能作为下一次翻译的源字幕。"""
+        video = self._video()
+        translated = self._sidecar(video, ".zh.机翻.srt")
+        exists, _, _ = self._match(video, ["en", "eng"], exclude_translated=True)
+        self.assertFalse(exists)
+        # 默认行为不变：查询“是否存在已有字幕”时仍能识别到该文件
+        exists, lang, name = self._match(video, ["en", "eng"])
+        self.assertTrue(exists)
+        self.assertEqual(lang, "zh")
+        self.assertEqual(name, translated.name)
+
+    def test_translation_excluded_but_english_source_found(self):
+        video = self._video()
+        self._sidecar(video, ".zh.机翻.srt")
+        tagged = self._sidecar(video, ".en.srt")
+        exists, lang, name = self._match(video, ["en", "eng"], exclude_translated=True)
+        self.assertTrue(exists)
+        self.assertEqual((lang, name), ("en", tagged.name))
+
+    def test_to_iso639_1_is_tolerant_of_invalid_input(self):
+        self.assertIsNone(plugin_module._to_iso639_1(""))
+        self.assertIsNone(plugin_module._to_iso639_1(None))
+        self.assertIsNone(plugin_module._to_iso639_1("机翻"))
+        self.assertIsNone(plugin_module._to_iso639_1("und"))
+        self.assertEqual(plugin_module._to_iso639_1("eng"), "en")
+        self.assertEqual(plugin_module._to_iso639_1(" English "), "en")
+
+
+class AiSubV2ManualOverwriteTest(unittest.TestCase):
+    """v2.6: manually triggered tasks force regeneration/overwrite."""
+
+    def setUp(self):
+        LOG_RECORDS.clear()
+        self.plugin = plugin_module.AiSubV2()
+        self.plugin._file_size = 0
+        self.plugin._enable_asr = False
+        self.plugin._translate_zh = False
+        self.plugin._send_notify = False
+        self.plugin._ignore_if_chinese_exists = True
+        self.tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="aisubv2-force-"))
+        self.addCleanup(shutil.rmtree, self.tmpdir, True)
+        self.video = self.tmpdir / "校园大逃杀2：篝火行动 (2026) - 2160p.mkv"
+        self.video.write_bytes(b"video")
+        self.generated = []
+        self.translated = []
+        self.plugin._AiSubV2__generate_subtitle = self._fake_generate
+        self.plugin._AiSubV2__translate_zh_subtitle = self._fake_translate
+
+    def _fake_generate(self, video_file, subtitle_file, enable_asr=True):
+        self.generated.append((video_file, subtitle_file))
+        return True, "en", f"{subtitle_file}.en.srt"
+
+    def _fake_translate(self, source_lang, source_subtitle, dest_subtitle):
+        self.translated.append((source_lang, source_subtitle, dest_subtitle))
+        pathlib.Path(dest_subtitle).write_text("translated", encoding="utf-8")
+        return types.SimpleNamespace(unrecovered=0)
+
+    def _run(self, force):
+        return self.plugin._AiSubV2__process_autosub(str(self.video), force=force)
+
+    def test_manual_force_overwrites_machine_translation(self):
+        existing = self.tmpdir / "校园大逃杀2：篝火行动 (2026) - 2160p.zh.机翻.srt"
+        existing.write_text("旧机翻内容", encoding="utf-8")
+        self.plugin._translate_zh = True
+        self.plugin._AiSubV2__chinese_subtitle_exists = lambda video_file: (True, True)
+
+        status = self._run(force=True)
+
+        self.assertEqual(status, plugin_module.TaskStatus.COMPLETED)
+        self.assertEqual(len(self.generated), 1, "手动执行应重新生成字幕")
+        self.assertEqual(len(self.translated), 1, "手动执行应重新翻译字幕")
+        self.assertEqual(self.translated[0][2], str(existing))
+        self.assertEqual(existing.read_text(encoding="utf-8"), "translated", "旧机翻字幕应被覆盖")
+
+    def test_auto_task_still_skips_when_machine_translation_exists(self):
+        self.plugin._AiSubV2__chinese_subtitle_exists = lambda video_file: (True, True)
+
+        status = self._run(force=False)
+
+        self.assertEqual(status, plugin_module.TaskStatus.IGNORED)
+        self.assertEqual(self.generated, [])
+        self.assertEqual(self.translated, [])
+
+    def test_manual_force_still_skips_real_chinese_subtitle(self):
+        """真实中文字幕不是“翻译字幕”，手动执行也不应无谓重做。"""
+        self.plugin._AiSubV2__chinese_subtitle_exists = lambda video_file: (True, False)
+
+        status = self._run(force=True)
+
+        self.assertEqual(status, plugin_module.TaskStatus.IGNORED)
+        self.assertEqual(self.generated, [])
+
+    def test_manual_force_bypasses_existing_target_subtitle_check(self):
+        self.plugin._AiSubV2__chinese_subtitle_exists = lambda video_file: (False, False)
+        self.plugin._AiSubV2__target_subtitle_exists = lambda video_file: True
+
+        self.assertEqual(self._run(force=True), plugin_module.TaskStatus.COMPLETED)
+        self.assertEqual(len(self.generated), 1)
+
+    def test_auto_task_skips_existing_target_subtitle(self):
+        self.plugin._AiSubV2__chinese_subtitle_exists = lambda video_file: (False, False)
+        self.plugin._AiSubV2__target_subtitle_exists = lambda video_file: True
+
+        self.assertEqual(self._run(force=False), plugin_module.TaskStatus.IGNORED)
+        self.assertEqual(self.generated, [])
+
+    def test_machine_translation_detection(self):
+        original = plugin_module.chinese.find_external_chinese_subtitle
+        self.addCleanup(setattr, plugin_module.chinese, "find_external_chinese_subtitle", original)
+        plugin = plugin_module.AiSubV2()
+
+        plugin_module.chinese.find_external_chinese_subtitle = (
+            lambda video_file: (True, "Movie (2026).zh.机翻.srt")
+        )
+        self.assertEqual(plugin._AiSubV2__chinese_subtitle_exists("/media/Movie (2026).mkv"), (True, True))
+
+        plugin_module.chinese.find_external_chinese_subtitle = (
+            lambda video_file: (True, "Movie (2026).chs.srt")
+        )
+        self.assertEqual(plugin._AiSubV2__chinese_subtitle_exists("/media/Movie (2026).mkv"), (True, False))
+
+
+class AiSubV2TaskQueueTest(unittest.TestCase):
+    """v2.6: task source is converted into the force flag of a task run."""
+
+    def _run_single_task(self, source):
+        plugin = plugin_module.AiSubV2()
+        plugin._tasks = {}
+        plugin._task_queue = queue.Queue()
+        plugin._event = threading.Event()
+        calls = []
+
+        def fake_process(video_file, force=False):
+            calls.append((video_file, force))
+            plugin._event.set()  # 让消费线程在本次任务后退出
+            return plugin_module.TaskStatus.COMPLETED
+
+        plugin._AiSubV2__process_autosub = fake_process
+        plugin.add_task("/media/movie/a.mkv", source)
+        plugin._consume_tasks()
+        return calls
+
+    def test_manual_task_forces_overwrite(self):
+        self.assertEqual(
+            self._run_single_task(plugin_module.TaskSource.MANUAL),
+            [("/media/movie/a.mkv", True)],
+        )
+
+    def test_transfer_event_task_is_not_forced(self):
+        self.assertEqual(
+            self._run_single_task(plugin_module.TaskSource.EVENT),
+            [("/media/movie/a.mkv", False)],
+        )
 
 
 if __name__ == "__main__":

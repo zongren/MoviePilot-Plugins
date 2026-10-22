@@ -291,6 +291,23 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(result.unrecovered, 0)
 
 
+class TranslateFileTests(unittest.TestCase):
+    def test_existing_destination_is_overwritten(self):
+        """手动重跑时，已存在的目标字幕文件必须被完整覆盖。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            source = os.path.join(tmp, "movie.en.srt")
+            dest = os.path.join(tmp, "movie.zh.机翻.srt")
+            pathlib.Path(source).write_text(SAMPLE, encoding="utf-8")
+            pathlib.Path(dest).write_text("旧机翻内容，应当被覆盖\n", encoding="utf-8")
+
+            provider = FakeProvider(lambda cues: full_json(cues))
+            SubtitleTranslator(provider).translate_file(source, dest)
+
+            text = pathlib.Path(dest).read_text(encoding="utf-8")
+            self.assertNotIn("旧机翻内容", text)
+            self.assertEqual(timestamp_lines(text), timestamp_lines(SAMPLE))
+
+
 class ApplyTests(unittest.TestCase):
     def test_apply_strictly_by_id(self):
         doc = parse_srt(SAMPLE)

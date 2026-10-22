@@ -30,6 +30,23 @@ from .translate.openai_translate import create_provider
 from .translate.srt_engine import SubtitleTranslator
 
 
+def _to_iso639_1(lang):
+    """
+    将语言标记安全地转换为 ISO 639-1 代码。
+
+    iso639.find/to_iso639_1 对空字符串会抛出 ValueError('Invalid search criteria.')，
+    对无法识别的标记抛出 NonExistentLanguageError；音轨/字幕文件的元数据经常缺失或
+    不规范，这里统一按“无法识别”处理（返回 None），避免整个任务因此失败。
+    """
+    if not lang or not isinstance(lang, str):
+        return None
+    try:
+        # iso639 对无对应两位代码的语言（如 und）会返回空字符串，同样视为无法识别
+        return iso639.to_iso639_1(lang.strip()) or None
+    except (iso639.NonExistentLanguageError, ValueError):
+        return None
+
+
 class UserInterruptException(Exception):
     """用户中断当前任务的异常"""
     pass
@@ -84,7 +101,7 @@ class AiSubV2(_PluginBase):
     # 主题色
     plugin_color = "#2C4F7E"
     # 插件版本
-    plugin_version = "2.5"
+    plugin_version = "2.6"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -293,7 +310,10 @@ class AiSubV2(_PluginBase):
                 task.status = TaskStatus.IN_PROGRESS
                 self._tasks[task.task_id] = task
                 self.save_tasks()
-                task.status = self.__process_autosub(task.video_file)
+                task.status = self.__process_autosub(
+                    task.video_file,
+                    force=task.source == TaskSource.MANUAL,
+                )
                 task.complete_time = datetime.now()
                 self._tasks[task.task_id] = task
                 self.save_tasks()
@@ -355,7 +375,14 @@ class AiSubV2(_PluginBase):
             return False
         return True
 
-    def __process_autosub(self, video_file) -> TaskStatus:
+    def __process_autosub(self, video_file, force=False) -> TaskStatus:
+        """
+        处理单个视频，生成（并翻译）字幕
+
+        :param video_file: 视频文件路径
+        :param force: 是否强制重新生成并覆盖已生成的字幕。手动添加的任务为 True：
+                     此时不再因“已存在字幕”而跳过，已存在的中文机翻字幕会被重新生成并覆盖
+        """
         if not video_file:
             return TaskStatus.FAILED
         # 如果文件大小小于指定大小， 则不处理
@@ -368,12 +395,17 @@ class AiSubV2(_PluginBase):
 
         try:
             logger.info(f"开始处理文件：{video_file} ...")
-            # 已存在中文字幕（外挂/内嵌）时跳过
-            if self._ignore_if_chinese_exists and self.__chinese_subtitle_exists(video_file):
-                logger.warn(f"已存在中文字幕，不进行处理")
-                return TaskStatus.IGNORED
-            # 目标字幕（不翻译时）是否已存在
-            if self.__target_subtitle_exists(video_file):
+            # 已存在中文字幕（外挂/内嵌）时跳过；
+            # 手动执行时，若已存在的只是插件此前生成的机翻字幕，则强制重新生成并覆盖
+            if self._ignore_if_chinese_exists:
+                chinese_exists, chinese_is_translated = self.__chinese_subtitle_exists(video_file)
+                if chinese_exists and not (force and chinese_is_translated):
+                    logger.warn(f"已存在中文字幕，不进行处理")
+                    return TaskStatus.IGNORED
+                if chinese_exists:
+                    logger.info(f"手动执行：检测到已有机翻字幕，强制重新生成并覆盖")
+            # 目标字幕（不翻译时）是否已存在；手动执行时忽略该检查，直接重新生成
+            if not force and self.__target_subtitle_exists(video_file):
                 logger.warn(f"字幕文件已经存在，不进行处理")
                 return TaskStatus.IGNORED
             # 生成字幕
@@ -513,19 +545,21 @@ class AiSubV2(_PluginBase):
         if not ret:
             logger.info(f"字幕源偏好：{self._translate_preference} 获取音轨元数据失败")
             return False, None, None
-        if not iso639.find(audio_lang) or not iso639.to_iso639_1(audio_lang):
+        # 音轨语言可能缺失或不规范，统一安全解析，无法识别时交给 ASR 自动检测
+        if not _to_iso639_1(audio_lang):
             logger.info(f"字幕源偏好：{self._translate_preference} 未从音轨元数据中获取到语言信息")
             audio_lang = 'auto'
         # 当字幕源偏好为origin_first时，优先使用音轨语言
         if self._translate_preference == "origin_first":
             prefer_subtitle_langs = ['en', 'eng'] if audio_lang == 'auto' else [audio_lang,
-                                                                                iso639.to_iso639_1(audio_lang)]
-        # 获取外挂字幕
+                                                                                _to_iso639_1(audio_lang)]
+        # 获取外挂字幕（排除插件自己生成的机翻字幕，避免把它当成翻译源）
         logger.info(f"使用 {prefer_subtitle_langs} 匹配已有外挂字幕文件 ...")
         external_sub_exist, external_sub_lang, exist_sub_name = self.__external_subtitle_exists(video_file,
                                                                                                 prefer_subtitle_langs,
                                                                                                 only_srt=True,
-                                                                                                strict=strict)
+                                                                                                strict=strict,
+                                                                                                exclude_translated=True)
         # 获取内嵌字幕
         logger.info(f"使用 {prefer_subtitle_langs} 匹配内嵌字幕文件 ...")
         inner_sub_exist, subtitle_index, inner_sub_lang, = self.__get_video_prefer_subtitle(video_meta,
@@ -541,7 +575,7 @@ class AiSubV2(_PluginBase):
         if self._translate_preference == "english_only":
             if external_sub_exist:
                 logger.info(f"字幕源偏好：{self._translate_preference} 外挂字幕存在，字幕语言 {external_sub_lang}")
-                return True, iso639.to_iso639_1(external_sub_lang), get_sub_path()
+                return True, _to_iso639_1(external_sub_lang), get_sub_path()
             elif inner_sub_exist:
                 logger.info(f"字幕源偏好：{self._translate_preference} 内嵌字幕存在，字幕语言 {inner_sub_lang}")
                 extract_subtitle = True
@@ -550,13 +584,13 @@ class AiSubV2(_PluginBase):
         else:  # english_first/origin_first
             if external_sub_exist and external_sub_lang in prefer_subtitle_langs:
                 logger.info(f"字幕源偏好：{self._translate_preference} 外挂字幕存在，字幕语言 {external_sub_lang}")
-                return True, iso639.to_iso639_1(external_sub_lang), get_sub_path()
+                return True, _to_iso639_1(external_sub_lang), get_sub_path()
             elif inner_sub_exist and inner_sub_lang in prefer_subtitle_langs:
                 logger.info(f"字幕源偏好：{self._translate_preference} 内嵌字幕存在，字幕语言 {inner_sub_lang}")
                 extract_subtitle = True
             elif external_sub_exist:
                 logger.info(f"字幕源偏好：{self._translate_preference} 外挂字幕存在，字幕语言 {external_sub_lang}")
-                return True, iso639.to_iso639_1(external_sub_lang), get_sub_path()
+                return True, _to_iso639_1(external_sub_lang), get_sub_path()
             elif inner_sub_exist:
                 logger.info(f"字幕源偏好：{self._translate_preference} 内嵌字幕存在，字幕语言 {inner_sub_lang}")
                 extract_subtitle = True
@@ -564,15 +598,14 @@ class AiSubV2(_PluginBase):
                 logger.info(f"字幕源偏好：{self._translate_preference} 未匹配到外挂或内嵌字幕,需要使用asr提取")
         # 提取内嵌字幕
         if extract_subtitle:
-            inner_sub_lang = iso639.to_iso639_1(inner_sub_lang) \
-                if (inner_sub_lang and iso639.find(inner_sub_lang) and iso639.to_iso639_1(inner_sub_lang)) else 'und'
+            inner_sub_lang = _to_iso639_1(inner_sub_lang) or 'und'
             extracted_sub_path = f"{subtitle_file}.{inner_sub_lang}.srt"
             Ffmpeg().extract_subtitle_from_video(video_file, extracted_sub_path, subtitle_index)
             logger.info(f"提取字幕完成：{extracted_sub_path}")
             return True, inner_sub_lang, extracted_sub_path
         # 使用asr音轨识别字幕
         if audio_lang != 'auto':
-            audio_lang = iso639.to_iso639_1(audio_lang)
+            audio_lang = _to_iso639_1(audio_lang) or 'auto'
 
         if not enable_asr:
             logger.info(f"未开启语音识别，且无已有字幕文件，跳过后续处理")
@@ -850,15 +883,19 @@ class AiSubV2(_PluginBase):
             pass
         return None
 
-    def __chinese_subtitle_exists(self, video_file) -> bool:
+    def __chinese_subtitle_exists(self, video_file) -> Tuple[bool, bool]:
         """
         判断视频是否已存在中文字幕（外挂或内嵌）
+
+        :return: (是否存在中文字幕, 已存在的外挂中文字幕是否为插件生成的机翻字幕)
         """
         try:
             found, file_name = chinese.find_external_chinese_subtitle(video_file)
             if found:
+                # 插件生成的翻译字幕会带「机翻」标记，手动执行时可以强制重新生成并覆盖
+                is_translated = "机翻" in os.path.basename(file_name or "")
                 logger.info(f"检测到外挂中文字幕：{file_name}")
-                return True
+                return True, is_translated
         except Exception as e:
             logger.warn(f"检测外挂中文字幕失败：{e}")
         try:
@@ -870,19 +907,21 @@ class AiSubV2(_PluginBase):
                 )
                 if found:
                     logger.info(f"检测到内嵌中文字幕：{info}")
-                    return True
+                    return True, False
         except Exception as e:
             logger.warn(f"检测内嵌中文字幕失败：{e}")
-        return False
+        return False, False
 
     @staticmethod
-    def __external_subtitle_exists(video_file, prefer_langs=None, only_srt=False, strict=True):
+    def __external_subtitle_exists(video_file, prefer_langs=None, only_srt=False, strict=True,
+                                   exclude_translated=False):
         """
         外部字幕文件是否存在,支持多种格式及扩展需求。
         :param video_file: 视频文件路径
         :param prefer_langs: 偏好语言列表，支持单个语言字符串或列表
         :param only_srt: 是否只匹配srt格式的字幕
         :param strict: 是否严格匹配偏好语言.当不存在偏好语言字幕但存在其他语言字幕时,是否返回其他字幕
+        :param exclude_translated: 是否排除插件自身生成的机翻字幕（机翻字幕不能作为翻译源）
         :return: 元组 (是否存在, 检测到的语言, 文件名)
         """
         video_dir, video_name = os.path.split(video_file)
@@ -903,8 +942,8 @@ class AiSubV2(_PluginBase):
             :param props: 属性字符串
             :return: (语言, 元数据列表)
             """
-            parts = props.split(".")
-            if len(parts) < 1:
+            parts = [part for part in (props or "").split(".") if part]
+            if not parts:
                 return None, []
 
             cur_subtitle_lang = None
@@ -915,12 +954,8 @@ class AiSubV2(_PluginBase):
                 if part in metadata_flags:
                     cur_metadata.append(part)
                 elif cur_subtitle_lang is None:
-                    try:
-                        iso639.to_iso639_1(part)
-                    except iso639.NonExistentLanguageError:
-                        continue
-                    else:
-                        cur_subtitle_lang = iso639.to_iso639_1(part)  # 记录最后一个语言标记
+                    # 无法识别的标记（含空标记）不是语言标记，继续向前查找
+                    cur_subtitle_lang = _to_iso639_1(part)
 
             return cur_subtitle_lang, cur_metadata
 
@@ -928,7 +963,12 @@ class AiSubV2(_PluginBase):
         second_lang = None
         second_file = None
         # 检查字幕文件
-        for file in os.listdir(video_dir):
+        try:
+            entries = os.listdir(video_dir)
+        except OSError as e:
+            logger.warn(f"读取外挂字幕目录失败：{video_dir} - {e}")
+            return False, None, None
+        for file in entries:
             if not file.startswith(video_name):
                 continue
 
@@ -940,6 +980,10 @@ class AiSubV2(_PluginBase):
             # 提取文件名中的语言和元数据信息
             props_str = file[len(video_name) + 1: -len(ext)] if file.startswith(video_name + ".") else ""
             subtitle_lang, metadata = parse_props(props_str)
+
+            # 机翻字幕是插件的输出结果，不能作为下一次翻译的源字幕
+            if exclude_translated and "机翻" in metadata:
+                continue
 
             # 如果没有语言标记，跳过
             if not subtitle_lang:
