@@ -166,7 +166,11 @@ my_openai.py
 
 # Node / 前端构建
 node_modules/
+# 前端依赖目录符号链接（构建用，不提交）
+plugins.v2/mediasyncguard/node_modules
 
 # Vue 联邦插件的前端编译产物需要随插件一起分发
 !plugins.v2/aisubv2/dist/
 !plugins.v2/aisubv2/dist/**
+!plugins.v2/mediasyncguard/dist/
+!plugins.v2/mediasyncguard/dist/**

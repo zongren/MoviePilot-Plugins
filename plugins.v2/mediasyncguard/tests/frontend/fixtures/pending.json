@@ -1,0 +1,12 @@
+{
+  "pending": [
+    {"action_id": "act-1", "kind": "delete_torrents", "created_at": 1792599900.0,
+     "due_at": 1792600500.0, "reason": "媒体条目已从 Jellyfin 删除", "dry_run": false,
+     "status": "pending", "payload": {"torrents": [{"downloader": "主QB", "hash": "deadbeef"}]},
+     "targets": ["主QB|deadbeef"]}
+  ],
+  "history": [
+    {"action_id": "act-0", "kind": "delete_media", "status": "done", "finished_at": 1792599000.0,
+     "summary": "已删除 1 个媒体条目"}
+  ]
+}

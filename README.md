@@ -6,3 +6,4 @@ MoviePilot三方插件市场：https://github.com/TimoYoung/MoviePilot-Plugins/
 ### 插件新增
 
 - [AI字幕自动生成(AiSub v2)](plugins.v2%2Faisubv2%2FREADME.md)
+- [媒体同步守护(MediaSyncGuard)](plugins.v2%2Fmediasyncguard%2FREADME.md)

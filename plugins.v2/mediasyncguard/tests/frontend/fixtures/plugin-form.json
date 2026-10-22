@@ -1,0 +1,111 @@
+{
+  "render_mode": "vue",
+  "conf": [
+    {
+      "component": "VForm",
+      "content": [
+        {
+          "component": "VRow",
+          "content": [
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 4 },
+              "content": [
+                {
+                  "component": "VSwitch",
+                  "props": { "model": "enabled", "label": "启用插件", "color": "primary" }
+                }
+              ]
+            },
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 4 },
+              "content": [
+                {
+                  "component": "VSwitch",
+                  "props": { "model": "notify", "label": "发送通知" }
+                }
+              ]
+            },
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 4 },
+              "content": [
+                {
+                  "component": "VSwitch",
+                  "props": {
+                    "model": "dry_run",
+                    "label": "演练模式（仅记录/通知，不自动删除）",
+                    "color": "warning"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "component": "VRow",
+          "content": [
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 6 },
+              "content": [
+                {
+                  "component": "VSelect",
+                  "props": {
+                    "model": "downloaders",
+                    "label": "监控的下载器",
+                    "items": [
+                      { "title": "主QB（qbittorrent，默认）", "value": "主QB" }
+                    ],
+                    "multiple": true,
+                    "chips": true,
+                    "clearable": true
+                  }
+                }
+              ]
+            },
+            {
+              "component": "VCol",
+              "props": { "cols": 12, "md": 6 },
+              "content": [
+                {
+                  "component": "VTextField",
+                  "props": {
+                    "model": "poll_seconds",
+                    "label": "监控间隔（秒）",
+                    "type": "number",
+                    "min": 15,
+                    "max": 3600
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "component": "VAlert",
+          "props": { "type": "warning", "variant": "tonal", "density": "compact", "class": "mb-2" },
+          "text": "未检测到已启用的 Jellyfin 媒体服务器，请先在 MoviePilot 设置中配置"
+        }
+      ]
+    }
+  ],
+  "model": {
+    "enabled": true,
+    "notify": true,
+    "dry_run": true,
+    "downloaders": ["主QB"],
+    "media_servers": [],
+    "poll_seconds": 60,
+    "grace_seconds": 600,
+    "batch_limit_media": 10,
+    "batch_limit_torrents": 3,
+    "auto_media_to_torrent": false,
+    "auto_torrent_to_media": false,
+    "auto_delete_files": true,
+    "delete_torrent_files": true,
+    "delete_media_sidecars": true,
+    "cleanup_empty_dirs": true
+  }
+}

@@ -1,0 +1,16 @@
+
+.ms-config[data-v-1bc1697f] {
+  background: rgb(var(--v-theme-background));
+}
+.ms-config-shell[data-v-1bc1697f] {
+  padding: 18px;
+}
+.ms-config-footer[data-v-1bc1697f] {
+  align-items: center;
+  border-top: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 16px;
+}

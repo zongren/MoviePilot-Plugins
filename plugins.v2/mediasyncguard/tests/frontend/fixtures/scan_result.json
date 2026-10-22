@@ -1,0 +1,35 @@
+{
+  "running": false, "started_at": 1792599990.0, "finished_at": 1792600000.0, "duration": 8.5,
+  "progress": "完成", "error": "",
+  "result": {
+    "generated_at": 1792600000.0, "duration": 8.5,
+    "stats": {"media_total": 8268, "torrent_total": 3778, "link_pairs": 8140,
+      "torrents_walked": 3687, "torrents_unsupported": 0, "torrents_missing_path": 3,
+      "video_files": 94527, "walk_errors": 0},
+    "media_without_torrent": [
+      {"id": "Jellyfin|abc", "server": "Jellyfin", "item_id": "abc",
+       "name": "老友记 - S00E001", "display_title": "老友记 S00 E01",
+       "item_type": "Episode", "series_name": "老友记", "season": 0, "episode": 1,
+       "path": "/medias/TV/老友记 (1994)/Specials/老友记 - S00E001.mkv",
+       "folder": "/medias/TV/老友记 (1994)/Specials", "size": 123456, "inode": 123, "dev": 58,
+       "history_hashes": [], "reason": "no_torrent_link"}
+    ],
+    "media_groups": [
+      {"group_id": "folder:/medias/TV/老友记 (1994)/Specials", "title": "老友记 S00",
+       "item_type": "Episode", "folder": "/medias/TV/老友记 (1994)/Specials",
+       "count": 1, "size": 123456, "item_ids": ["Jellyfin|abc"]}
+    ],
+    "torrents_without_media": [
+      {"id": "主QB|deadbeef", "downloader": "主QB", "hash": "deadbeef",
+       "name": "Stuart.Fails.To.Save.The.Universe.S01.Complete.1080p", "category": "TV",
+       "tags": ["MoviePilot自动辅种"], "state": "stalledUP", "progress": 1.0, "size": 9999999,
+       "save_path": "/medias/Downloads/TV",
+       "content_path": "/medias/Downloads/TV/Stuart.Fails.../S01E01.mkv",
+       "added_on": 1792500000, "completion_on": 1792500000, "completed": true,
+       "video_files": 12, "path_exists": true, "reason": "no_media_link",
+       "ignored_reason": "", "shared_torrents": 0, "safe_to_delete_files": true}
+    ],
+    "torrent_groups": [{"group_id": "category:TV", "title": "TV", "count": 1, "size": 9999999}],
+    "skipped": {"downloading": 5, "no_video": 90, "ignored": 2, "missing_path": 3, "unsupported": 0}
+  }
+}
