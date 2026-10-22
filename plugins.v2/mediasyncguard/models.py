@@ -35,12 +35,31 @@ SIDECAR_EXTENSIONS = frozenset(
 # 字幕类附属文件后缀（清理时优先匹配，便于统计）
 SUBTITLE_EXTENSIONS = frozenset({"srt", "ass", "ssa", "sub", "idx", "sup", "vtt", "smi"})
 
+# 下载器“未完成文件”后缀。qBittorrent 启用 IncompleteFilesExt 时会把未完成文件
+# 命名为 `xxx.mkv.!qB`，但该文件与媒体库文件可能仍是同一个 inode（硬链接）。
+# 识别硬链接时必须先去掉该后缀，否则会把已关联的媒体误判为“无种子”。
+DOWNLOAD_TEMP_SUFFIXES = (".!qb", ".!ut", ".part", ".td", ".tmp")
+
+
+def strip_download_temp_suffix(name: str) -> str:
+    """去掉下载器未完成文件后缀（不区分大小写）；非临时文件原样返回。"""
+    text = str(name or "")
+    lower = text.casefold()
+    for suffix in DOWNLOAD_TEMP_SUFFIXES:
+        if lower.endswith(suffix):
+            return text[: -len(suffix)]
+    return text
+
 
 def file_extension(path: str) -> str:
-    """返回小写、不带点的文件后缀；无后缀返回空字符串。"""
+    """返回小写、不带点的文件后缀；无后缀返回空字符串。
+
+    对下载器未完成文件（如 ``movie.mkv.!qB``）返回其真实媒体后缀 ``mkv``。
+    """
     if not path:
         return ""
-    return os.path.splitext(str(path).rsplit("/", 1)[-1])[1].lower().lstrip(".")
+    name = strip_download_temp_suffix(str(path).rsplit("/", 1)[-1])
+    return os.path.splitext(name)[1].lower().lstrip(".")
 
 
 def is_video_file(path: str) -> bool:

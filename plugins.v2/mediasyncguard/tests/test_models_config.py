@@ -112,6 +112,14 @@ class ModelsTest(unittest.TestCase):
         self.assertTrue(is_sidecar_file("/x/a.zh.srt"))
         self.assertFalse(is_sidecar_file("/x/a.mkv"))
 
+    def test_downloader_incomplete_suffix_is_still_video(self):
+        self.assertTrue(is_video_file("/x/movie.mkv.!qB"))
+        self.assertTrue(is_video_file("/x/movie.mkv.!qB"))
+        self.assertTrue(is_video_file("/x/movie.mkv.!ut"))
+        self.assertTrue(is_video_file("/x/movie.mp4.part"))
+        self.assertFalse(is_video_file("/x/readme.txt.!qB"))
+        self.assertTrue(is_sidecar_file("/x/movie.srt.!qB"))
+
     def test_media_item_display_and_serialization(self):
         item = MediaItem(
             server="Jellyfin",

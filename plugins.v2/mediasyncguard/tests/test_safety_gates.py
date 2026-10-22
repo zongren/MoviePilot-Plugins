@@ -398,6 +398,47 @@ class ScanIgnoreKeywordTest(unittest.TestCase):
         self.assertEqual(result["skipped"]["ignored_keyword"], 0)
 
 
+class QbIncompleteSuffixLinkTest(unittest.TestCase):
+    """qBittorrent 未完成文件后缀 `.!qB` 不应导致媒体/种子关联失效。"""
+
+    def test_media_hardlinked_to_incomplete_suffixed_file_is_linked(self):
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory(prefix="msguard-suffix-") as tmp:
+            root = Path(tmp)
+            media_dir = root / "media"
+            download_dir = root / "downloads"
+            media_dir.mkdir()
+            download_dir.mkdir()
+            media = media_dir / "Show - S01E01.mkv"
+            media.write_bytes(b"video-data")
+            # 下载器把同一个 inode 的链接命名为未完成文件
+            os.link(media, download_dir / "Show - S01E01.mkv.!qB")
+            media_item = MediaItem(
+                server="Jellyfin",
+                item_id="m1",
+                path=str(media),
+                inode=int(media.stat().st_ino),
+                dev=int(media.stat().st_dev),
+                item_type="Episode",
+            )
+            torrent = TorrentItem(
+                downloader="主QB",
+                hash="abc",
+                name="Show.S01",
+                save_path=str(download_dir),
+                content_path=str(download_dir),
+                progress=1.0,
+            )
+            result = REAL_LINKER.LinkBuilder().build([media_item], [torrent])
+            self.assertEqual(len(result.index.torrents_of(media_item)), 1)
+            self.assertEqual(result.index.torrents_of(media_item)[0].hash, "abc")
+            self.assertEqual(
+                [ref.item_id for ref in result.index.media_of(torrent)], ["m1"]
+            )
+
+
 class JellyfinPaginationGateTest(unittest.TestCase):
     """M3：分页短页但 TotalRecordCount 未取完 → 必须抛 ClientError。"""
 
