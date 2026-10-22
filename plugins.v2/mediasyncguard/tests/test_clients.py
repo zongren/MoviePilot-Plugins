@@ -218,6 +218,26 @@ class JellyfinApiTest(unittest.TestCase):
         api = clients_module.JellyfinApi("JF", "", "key", [])
         self.assertFalse(api.configured)
 
+    def test_convert_directory_movie_expands_video_inodes(self):
+        stream = self._write_media("Movies/BDMV Movie/BDMV/STREAM/00000.m2ts")
+        stat_result = stream.stat()
+        api = self._make_api()
+        item, warning = api._convert_item(
+            {
+                "Id": "movie-1",
+                "Type": "Movie",
+                "Name": "BDMV Movie",
+                "Path": "/media/Movies/BDMV Movie",
+            }
+        )
+        self.assertIsNotNone(item, warning)
+        self.assertEqual(warning, "")
+        self.assertEqual(item.path, str(self.root / "Movies" / "BDMV Movie"))
+        # InodeKey 是 (dev, inode)，转换后必须写回 MediaItem.inode/dev 且不能颠倒
+        self.assertEqual(item.inode, stat_result.st_ino)
+        self.assertEqual(item.dev, stat_result.st_dev)
+        self.assertEqual(item.extra_inode_keys, [])
+
     def test_test_connection_success(self):
         FakeRequestUtils.get_handler = lambda url, params: FakeResponse(
             200, {"ServerName": "MyJellyfin"}

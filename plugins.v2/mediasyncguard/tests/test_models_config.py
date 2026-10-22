@@ -136,6 +136,16 @@ class ModelsTest(unittest.TestCase):
         again = MediaItem.from_dict(item.to_dict())
         self.assertEqual(again.to_dict(), item.to_dict())
 
+    def test_media_item_extra_inode_keys_roundtrip(self):
+        item = MediaItem(server="Jellyfin", item_id="x", path="/m", inode=1, dev=2)
+        item.extra_inode_keys = [(2, 100), (2, 200)]
+        restored = MediaItem.from_dict(item.to_dict())
+        self.assertEqual(restored.extra_inode_keys, [(2, 100), (2, 200)])
+        restored2 = MediaItem.from_dict(
+            {"server": "J", "item_id": "y", "extra_inode_keys": [["3", "4"], ["bad"], []]}
+        )
+        self.assertEqual(restored2.extra_inode_keys, [(3, 4)])
+
     def test_torrent_item_serialization_and_completed(self):
         torrent = TorrentItem(
             downloader="主QB",

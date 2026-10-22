@@ -426,6 +426,7 @@ class JellyfinApi:
         inode = dev = size = 0
         mtime = 0.0
         warning = ""
+        extra_inode_keys: List[Any] = []
         if mapped_path:
             try:
                 stat_result = os.stat(mapped_path)
@@ -436,6 +437,25 @@ class JellyfinApi:
                 dev = safe_int(getattr(stat_result, "st_dev", 0))
                 size = safe_int(getattr(stat_result, "st_size", 0))
                 mtime = safe_float(getattr(stat_result, "st_mtime", 0.0))
+                if os.path.isdir(mapped_path):
+                    # Jellyfin 可能把蓝光 BDMV 目录整体识别为一个 Movie 条目；
+                    # 此时目录 inode 无法与种子视频文件匹配，需展开目录内视频 inode。
+                    try:
+                        try:
+                            from .linker import FileSystemWalker
+                        except ImportError:  # 单元测试/独立脚本
+                            from linker import FileSystemWalker  # type: ignore
+                        walker = FileSystemWalker(max_files_per_torrent=20000, max_depth=8)
+                        video_keys = walker.collect_video_inodes(mapped_path)
+                    except Exception as err:  # noqa: BLE001 - 目录展开失败只降级
+                        logger.warning(f"展开目录型媒体失败（{mapped_path}）：{err}")
+                        video_keys = []
+                    if video_keys:
+                        # FileSystemWalker 的 InodeKey 是 (dev, inode)，不要写反
+                        dev, inode = int(video_keys[0][0]), int(video_keys[0][1])
+                        extra_inode_keys = [
+                            (int(key[0]), int(key[1])) for key in video_keys[1:]
+                        ]
         item = MediaItem(
             server=self.name,
             item_id=item_id,
@@ -451,6 +471,7 @@ class JellyfinApi:
             episode=safe_int(raw.get("IndexNumber")),
             parent_id=_text(raw.get("ParentId")),
             series_id=_text(raw.get("SeriesId")),
+            extra_inode_keys=extra_inode_keys,
         )
         return item, warning
 

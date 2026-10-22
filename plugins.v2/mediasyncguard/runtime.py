@@ -1106,8 +1106,10 @@ class SyncRuntime:
                 downloader = _text(getattr(record, "downloader", None))
                 torrent_hash = _text(getattr(record, "download_hash", None)).lower()
                 dest = _text(getattr(record, "dest", None))
-                if downloader and torrent_hash and dest:
-                    rows.append((downloader, torrent_hash, dest))
+                src = _text(getattr(record, "src", None))
+                if dest and (downloader or src):
+                    # 允许 downloader/download_hash 缺失：LinkBuilder 会用整理来源 src 反查现存种子
+                    rows.append((downloader, torrent_hash, dest, src))
         except Exception as err:  # noqa: BLE001 - 历史兜底失败只降级，不影响主流程
             logger.warning(f"媒体同步守护读取 MoviePilot 整理历史失败（忽略历史兜底）：{err}")
             rows = []
@@ -1993,6 +1995,14 @@ class SyncRuntime:
                 continue
             if not path or not is_safe_delete_target(path, config):
                 failed.append({"id": item_id, "error": "媒体路径不在允许删除的目录内"})
+                continue
+            if os.path.isdir(path):
+                failed.append(
+                    {
+                        "id": item_id,
+                        "error": "目录型媒体（如蓝光 BDMV）暂不支持插件内删除，请在 Jellyfin 中操作",
+                    }
+                )
                 continue
             # 同一路径被其它媒体条目引用时不能删除（删除文件会让另一个条目失效）
             try:

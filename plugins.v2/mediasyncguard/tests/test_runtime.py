@@ -1093,7 +1093,7 @@ class PendingAndConnectionsTest(RuntimeTestBase):
         transfer_models.TransferHistory.list_by_page_calls = 0
         runtime = self._new_runtime(self.config)
         rows = runtime._read_history_rows()
-        self.assertEqual(rows, [("主QB", "abc", str(self.media_root / "x.mkv"))])
+        self.assertEqual(rows, [("主QB", "abc", str(self.media_root / "x.mkv"), "")])
         runtime._read_history_rows()
         self.assertEqual(transfer_models.TransferHistory.list_by_page_calls, 1)
 

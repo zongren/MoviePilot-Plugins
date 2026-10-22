@@ -180,6 +180,9 @@ class FileSystemWalker:
             self.walk_errors += 1
             return []
         if stat_module.S_ISREG(root_stat.st_mode):
+            # 单文件种子内容也必须是视频文件；避免把 .exe 等伪装文件当成媒体
+            if not is_video_file(path):
+                return []
             return [self._inode_key(root_stat)]
         if not stat_module.S_ISDIR(root_stat.st_mode):
             return []
@@ -299,9 +302,20 @@ class LinkBuilder:
                     item.size = info.size
                     item.mtime = info.mtime
             media_by_key[item.key] = item
+            media_inode_keys: List[InodeKey] = []
             if item.has_inode:
+                media_inode_keys.append(item.inode_key)
+            for extra_key in getattr(item, "extra_inode_keys", None) or []:
+                try:
+                    key = (int(extra_key[0]), int(extra_key[1]))
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if key[0] and key[1] and key not in media_inode_keys:
+                    media_inode_keys.append(key)
+            if media_inode_keys:
                 stats.media_with_inode += 1
-                index.add_media_inode(item.inode_key, item)
+                for media_inode_key in media_inode_keys:
+                    index.add_media_inode(media_inode_key, item)
 
         # 3. 种子视频文件 inode
         torrent_by_key: Dict[str, TorrentItem] = {torrent.key: torrent for torrent in torrent_items}
@@ -340,22 +354,58 @@ class LinkBuilder:
                 path_key = normalize_history_path(item.path)
                 if path_key and path_key not in media_by_path:
                     media_by_path[path_key] = item
+            # src -> 种子候选：MoviePilot 历史记录有可能缺少 download_hash，
+            # 此时用整理来源路径反查仍存在的种子（目录型种子匹配其内部文件）。
+            torrents_by_source: Dict[str, List[TorrentItem]] = {}
+            for torrent in history_torrents.values():
+                content_path = normalize_history_path(torrent.content_path)
+                if content_path:
+                    torrents_by_source.setdefault(content_path, []).append(torrent)
             for row in history_rows:
                 if row is None:
                     continue
                 try:
-                    downloader, torrent_hash, media_path = row
-                except (TypeError, ValueError):
+                    row_values = tuple(row)
+                except TypeError:
                     continue
-                if not downloader or not torrent_hash or not media_path:
+                if len(row_values) >= 4:
+                    downloader, torrent_hash, media_path, source_path = row_values[:4]
+                elif len(row_values) == 3:
+                    downloader, torrent_hash, media_path = row_values
+                    source_path = ""
+                else:
+                    continue
+                if not media_path or (not downloader and not torrent_hash and not source_path):
                     continue
                 media_item = media_by_path.get(normalize_history_path(media_path))
                 if media_item is None:
                     continue
-                torrent = history_torrents.get(torrent_key(str(downloader), str(torrent_hash)))
-                if torrent is None:
-                    continue
-                index.add_link(media_item, torrent, evidence="history")
+                matched: List[TorrentItem] = []
+                if torrent_hash:
+                    if downloader:
+                        torrent = history_torrents.get(
+                            torrent_key(str(downloader), str(torrent_hash))
+                        )
+                        if torrent is not None:
+                            matched.append(torrent)
+                    else:
+                        target_hash = str(torrent_hash).lower()
+                        matched.extend(
+                            torrent
+                            for torrent in history_torrents.values()
+                            if str(torrent.hash).lower() == target_hash
+                        )
+                elif source_path:
+                    normalized_source = normalize_history_path(source_path)
+                    exact = torrents_by_source.get(normalized_source) or []
+                    matched.extend(exact)
+                    if not exact:
+                        for torrent in history_torrents.values():
+                            content_path = normalize_history_path(torrent.content_path)
+                            if content_path and normalized_source.startswith(content_path + os.sep):
+                                matched.append(torrent)
+                for torrent in matched:
+                    index.add_link(media_item, torrent, evidence="history")
 
         # 5. 统计关联数（以最终 evidence 为准：inode 关联优先于 history）
         linked_pairs = 0

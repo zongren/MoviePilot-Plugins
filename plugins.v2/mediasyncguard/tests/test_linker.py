@@ -78,11 +78,11 @@ class FileSystemWalkerTest(TempDirTestCase):
         inodes = FileSystemWalker().collect_video_inodes(str(path))
         self.assertEqual(inodes, [self.inode_of(path)])
 
-    def test_collect_single_non_video_file_still_returns_inode(self):
-        # 契约：path 为文件时直接 stat（单文件种子的 content_path 就是内容文件）
+    def test_collect_single_non_video_file_is_ignored(self):
+        # 单文件种子的 content_path 也必须是视频文件；.exe/.epub 等不能当成媒体
         path = self.make_file("book.epub")
         inodes = FileSystemWalker().collect_video_inodes(str(path))
-        self.assertEqual(inodes, [self.inode_of(path)])
+        self.assertEqual(inodes, [])
 
     def test_collect_directory_videos_only(self):
         video1 = self.make_file("show/e01.mkv")
@@ -311,6 +311,42 @@ class LinkBuilderTest(TempDirTestCase):
         self.assertEqual(result.index.media_of(torrent), [media_ref(media)])
         pair_key = f"{media.key}->{torrent.key}"
         self.assertEqual(result.index.evidence[pair_key], "history")
+
+    def test_directory_media_extra_inode_keys_are_indexed(self):
+        source = self.make_file("downloads/BDMV/STREAM/00000.m2ts", b"video")
+        media_dir = self.root / "media" / "Movie"
+        media_dir.mkdir(parents=True)
+        media = self.make_media(self.make_file("media/placeholder.mkv", b"x"), "m1")
+        media.path = str(media_dir)
+        media.inode = 1
+        media.dev = 1
+        media.extra_inode_keys = [(source.stat().st_dev, source.stat().st_ino)]
+        torrent = TorrentItem(
+            downloader="主QB", hash="bdmv", content_path=str(self.root / "downloads" / "BDMV")
+        )
+        result = self.build([media], [torrent])
+        self.assertEqual(result.index.media_of(torrent), [media_ref(media)])
+
+    def test_single_file_non_video_is_not_indexed(self):
+        fake = self.make_file("downloads/fake.exe", b"MZ")
+        media = self.make_media(self.make_file("media/movie.mkv", b"x"), "m1")
+        torrent = TorrentItem(downloader="主QB", hash="exe", content_path=str(fake))
+        result = self.build([media], [torrent])
+        self.assertEqual(torrent.video_files, 0)
+        self.assertEqual(result.index.media_of(torrent), [])
+
+    def test_history_fallback_matches_source_when_hash_missing(self):
+        media_file = self.make_file("media/movie.mkv", b"movie")
+        source = self.make_file("downloads/SYNCOPY.mkv", b"src")
+        media = self.make_media(media_file, "m1")
+        torrent = TorrentItem(downloader="主QB", hash="", content_path=str(source))
+        result = self.build(
+            [media],
+            [torrent],
+            history_rows=[("", "", str(media_file), str(source))],
+        )
+        self.assertEqual(result.stats.history_linked_pairs, 1)
+        self.assertEqual(result.index.media_of(torrent), [media_ref(media)])
 
     def test_history_rows_accepts_generator(self):
         media_file = self.make_file("media/movie.mkv", b"movie")

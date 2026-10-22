@@ -103,6 +103,19 @@ def torrent_key(downloader: str, torrent_hash: str) -> str:
     return f"{downloader}|{str(torrent_hash).lower()}"
 
 
+def _parse_inode_key_list(value: Any) -> List[InodeKey]:
+    """解析 ``[[dev, inode], ...]`` 形式的 inode 列表；非法值忽略。"""
+    result: List[InodeKey] = []
+    for item in value or []:
+        try:
+            dev, inode = int(item[0]), int(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if dev and inode:
+            result.append((dev, inode))
+    return result
+
+
 @dataclass
 class MediaItem:
     """媒体服务器中的一个可播放媒体条目（电影或剧集）。"""
@@ -121,6 +134,9 @@ class MediaItem:
     episode: int = 0
     parent_id: str = ""
     series_id: str = ""
+    # 目录型媒体条目（蓝光 BDMV 等）内的多个视频文件 inode；
+    # inode/dev 存主视频文件，其余放这里用于硬链接匹配。
+    extra_inode_keys: List[InodeKey] = field(default_factory=list)
 
     @property
     def key(self) -> str:
@@ -166,6 +182,9 @@ class MediaItem:
             "episode": self.episode,
             "parent_id": self.parent_id,
             "series_id": self.series_id,
+            "extra_inode_keys": [
+                [int(dev), int(inode)] for dev, inode in (self.extra_inode_keys or [])
+            ],
         }
 
     @classmethod
@@ -186,6 +205,7 @@ class MediaItem:
             episode=safe_int(data.get("episode")),
             parent_id=str(data.get("parent_id") or ""),
             series_id=str(data.get("series_id") or ""),
+            extra_inode_keys=_parse_inode_key_list(data.get("extra_inode_keys")),
         )
 
 
