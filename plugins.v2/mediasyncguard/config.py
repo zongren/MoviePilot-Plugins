@@ -139,6 +139,8 @@ class PluginConfig:
     # 一次性扫描忽略关键词：匹配媒体路径/目录或种子名称/内容路径的行不会出现在扫描结果中
     # （用于转码/重新压制后不再有硬链接、但业务上有关联的内容）
     scan_ignore_keywords: List[str] = field(default_factory=list)
+    # 一次性扫描是否检查下载目录中的临时/残留文件（.!qB/.!ut/.part 等）
+    scan_temp_files: bool = True
     keep_history_actions: int = 50
 
     @property
@@ -185,6 +187,7 @@ class PluginConfig:
             clean_moviepilot_history=_as_bool(data.get("clean_moviepilot_history"), True),
             scan_include_unfinished=_as_bool(data.get("scan_include_unfinished"), False),
             scan_ignore_keywords=_as_str_list(data.get("scan_ignore_keywords")),
+            scan_temp_files=_as_bool(data.get("scan_temp_files"), True),
             keep_history_actions=_as_int(data.get("keep_history_actions"), 50, minimum=0, maximum=1000),
         )
         return config

@@ -1581,6 +1581,29 @@ class SyncRuntime:
             if self._scan_state.get("running"):
                 self._scan_state["progress"] = progress
 
+    def _scan_temp_files(self, snapshot: Snapshot) -> Dict[str, Any]:
+        """扫描下载目录中的临时后缀文件并标注归属任务（失败时降级为空结果）。"""
+        try:  # MoviePilot 中作为包模块
+            from . import residue as residue_module
+        except ImportError:  # 单元测试
+            import residue as residue_module  # type: ignore
+        bundle = self._clients
+        if bundle is None:
+            return {"rows": [], "stats": {}, "errors": ["尚未配置可用的服务客户端"]}
+
+        def _provider(downloader: str, torrent_hash: str) -> Optional[List[str]]:
+            api = self._find_qbittorrent(downloader)
+            if api is None:
+                return None
+            return api.list_files(torrent_hash)
+
+        scanned = residue_module.scan_temp_files(
+            self._config,
+            list(snapshot.torrents.values()),
+            _provider,
+        )
+        return scanned.to_dict()
+
     def _finalize_scan(
         self,
         *,
@@ -1681,6 +1704,24 @@ class SyncRuntime:
                 stats=build.stats,
                 duration=duration,
             )
+            if getattr(self._config, "scan_temp_files", True):
+                self._set_scan_progress("正在检查下载目录临时/残留文件…")
+                try:
+                    temp_data = self._scan_temp_files(snapshot)
+                except Exception as err:  # noqa: BLE001 - 临时文件扫描失败不应让整个扫描失败
+                    logger.warning(f"媒体同步守护扫描下载目录临时文件失败：{err}")
+                    temp_data = {
+                        "rows": [],
+                        "stats": {},
+                        "errors": [f"检查下载目录临时文件失败：{err}"],
+                    }
+                result["temp_files"] = temp_data.get("rows") or []
+                result["temp_file_stats"] = temp_data.get("stats") or {}
+                result["temp_file_errors"] = temp_data.get("errors") or []
+            else:
+                result["temp_files"] = []
+                result["temp_file_stats"] = {}
+                result["temp_file_errors"] = []
             self._scan_links = build.index
             self._scan_snapshot = snapshot
             self._last_scan_summary = {
@@ -1727,12 +1768,14 @@ class SyncRuntime:
             kind = "torrents"
         elif kind in {"delete_media", "media_items"}:
             kind = "media"
-        if kind not in {"media", "torrents"}:
+        elif kind in {"temp_files", "tempfiles", "downloads", "residue"}:
+            kind = "temp_files"
+        if kind not in {"media", "torrents", "temp_files"}:
             return {
                 "success": False,
                 "deleted": 0,
                 "failed": [],
-                "warnings": ["未知的操作类型，仅支持 media / torrents"],
+                "warnings": ["未知的操作类型，仅支持 media / torrents / temp_files"],
                 "message": "未知的操作类型",
             }
         ids = [str(item).strip() for item in (payload.get("ids") or []) if str(item).strip()]
@@ -1808,7 +1851,75 @@ class SyncRuntime:
 
         if kind == "media":
             return self._apply_media_ids(ids, payload, result, links, guard_module)
+        if kind == "temp_files":
+            return self._apply_temp_files(ids, result)
         return self._apply_torrent_ids(ids, payload, result, links, guard_module)
+
+    def _apply_temp_files(self, ids: List[str], result: Dict[str, Any]) -> Dict[str, Any]:
+        """删除扫描页选中的下载目录临时/残留文件（仅限已确认不属于现存任务的条目）。"""
+        rows = {
+            str(row.get("id")): row
+            for row in result.get("temp_files") or []
+            if isinstance(row, dict) and row.get("id")
+        }
+        download_roots = [
+            str(item).rstrip("/")
+            for item in (getattr(self._config, "download_delete_roots", None) or [])
+            if str(item).strip()
+        ]
+        deleted = 0
+        deleted_ids: List[str] = []
+        failed: List[Dict[str, str]] = []
+        warnings: List[str] = []
+        for item_id in ids:
+            row = rows.get(item_id)
+            if row is None:
+                failed.append({"id": item_id, "error": "扫描结果中不存在该条目"})
+                continue
+            path = _text(row.get("path"))
+            if not row.get("deletable"):
+                if row.get("owner_hashes"):
+                    failed.append(
+                        {"id": item_id, "error": "该文件仍属于现存下载任务，禁止删除"}
+                    )
+                else:
+                    failed.append(
+                        {"id": item_id, "error": "无法确认该文件是否仍被任务使用，已跳过"}
+                    )
+                continue
+            if not path:
+                failed.append({"id": item_id, "error": "条目缺少文件路径"})
+                continue
+            normalized = os.path.normpath(path)
+            if not download_roots:
+                failed.append({"id": item_id, "error": "未配置下载目录允许删除范围"})
+                continue
+            if not any(
+                normalized == root or normalized.startswith(root + os.sep)
+                for root in (os.path.normpath(item) for item in download_roots)
+                if root
+            ):
+                failed.append({"id": item_id, "error": "路径不在允许删除的下载目录内"})
+                continue
+            try:
+                os.remove(normalized)
+            except FileNotFoundError:
+                pass
+            except OSError as err:
+                failed.append({"id": item_id, "error": f"删除失败：{err}"})
+                continue
+            deleted += 1
+            deleted_ids.append(item_id)
+        if deleted_ids:
+            self._remove_scan_rows("temp_files", deleted_ids)
+        message = f"已删除 {deleted} 个临时文件" if deleted else "未删除任何临时文件"
+        return {
+            "success": deleted > 0,
+            "deleted": deleted,
+            "failed": failed,
+            "warnings": warnings,
+            "message": message,
+        }
 
     def _apply_media_ids(
         self,
@@ -2072,6 +2183,8 @@ class SyncRuntime:
                 return
             rows = [row for row in result.get(key) or [] if str(row.get("id")) not in set(removed_ids)]
             result[key] = rows
+            if key == "temp_files":
+                return
             # 同步过滤分组中已空的 item_ids
             group_key = "media_groups" if key == "media_without_torrent" else "torrent_groups"
             groups = []

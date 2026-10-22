@@ -342,6 +342,76 @@ class ManualApplySafetyTest(T.ScanAndApplyTest):
         self.assertEqual(self.jellyfin.deleted, [])
 
 
+class TempFileApplyTest(T.ScanAndApplyTest):
+    """扫描页的下载目录临时文件清理：只允许删除已确认无主的文件。"""
+
+    def _prepare(self):
+        downloads = self.media_root / "Downloads"
+        orphan = downloads / "junk.mkv.!qB"
+        orphan.write_bytes(b"junk")
+        owned = downloads / "owned.mkv.!qB"
+        owned.write_bytes(b"owned")
+        rows = [
+            {
+                "id": "temp:orphan",
+                "path": str(orphan),
+                "name": orphan.name,
+                "suffix": ".!qb",
+                "size": 4,
+                "owner_hashes": [],
+                "deletable": True,
+                "reason": "orphan_temp_file",
+            },
+            {
+                "id": "temp:owned",
+                "path": str(owned),
+                "name": owned.name,
+                "suffix": ".!qb",
+                "size": 5,
+                "owner_hashes": ["abc"],
+                "deletable": False,
+                "reason": "owned_by_torrent",
+            },
+        ]
+        state = self._run_scan(self._result())
+        self.runtime._scan_state["result"]["temp_files"] = rows
+        self.runtime._scan_state["result"]["temp_file_stats"] = {"temp_files": 2}
+        self._seed_live_state()
+        return orphan, owned
+
+    def test_apply_deletes_only_orphan_temp_file(self):
+        orphan, owned = self._prepare()
+        response = self.runtime.apply_scan_selection(
+            {"kind": "temp_files", "ids": ["temp:orphan", "temp:owned"]}
+        )
+        self.assertEqual(response["deleted"], 1, response)
+        self.assertFalse(orphan.exists())
+        self.assertTrue(owned.exists())
+        self.assertTrue(
+            any("仍属于现存下载任务" in item["error"] for item in response["failed"])
+        )
+        remaining = [row["id"] for row in self.runtime._scan_state["result"]["temp_files"]]
+        self.assertEqual(remaining, ["temp:owned"])
+
+    def test_apply_refuses_path_outside_download_roots(self):
+        orphan, _owned = self._prepare()
+        outside = self.media_root / "outside.mkv.!qB"
+        outside.write_bytes(b"x")
+        self.runtime._scan_state["result"]["temp_files"].append(
+            {
+                "id": "temp:outside",
+                "path": str(outside),
+                "deletable": True,
+                "owner_hashes": [],
+            }
+        )
+        response = self.runtime.apply_scan_selection(
+            {"kind": "temp_files", "ids": ["temp:outside"]}
+        )
+        self.assertEqual(response["deleted"], 0, response)
+        self.assertTrue(outside.exists())
+
+
 class ScanIgnoreKeywordTest(unittest.TestCase):
     """一次性扫描忽略关键词：转码/重新压制后无硬链接的内容可按业务关系隐藏。"""
 

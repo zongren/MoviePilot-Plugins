@@ -29,7 +29,7 @@ class MediaSyncGuard(_PluginBase):
     # 插件图标
     plugin_icon = "mediasyncguard.png"
     # 插件版本
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -533,6 +533,21 @@ class MediaSyncGuard(_PluginBase):
                                         "props": {
                                             "model": "scan_include_unfinished",
                                             "label": "扫描包含未完成种子",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "scan_temp_files",
+                                            "label": "扫描下载器临时/残留文件",
+                                            "hint": "检查 .!qB/.!ut/.part 等文件，并标注是否仍属于现存任务",
+                                            "persistent-hint": True,
                                         },
                                     }
                                 ],

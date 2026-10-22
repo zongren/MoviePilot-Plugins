@@ -283,6 +283,58 @@ describe('MediaSyncGuard Page.vue', () => {
     expect(allCategory.classList.contains('ms-category-item--active')).toBe(true)
   })
 
+  it('renders downloader temp-file rows and only allows deleting orphans', async () => {
+    const scan = JSON.parse(JSON.stringify(scanFixture))
+    scan.result.temp_files = [
+      {
+        id: 'temp:owned',
+        path: '/medias/Downloads/TV/pack/ep.mkv.!qB',
+        name: 'ep.mkv.!qB',
+        suffix: '.!qb',
+        size: 100,
+        deletable: false,
+        reason: 'owned_by_torrent',
+        owner_hashes: ['hash1'],
+        owner_names: ['Pack Task'],
+      },
+      {
+        id: 'temp:orphan',
+        path: '/medias/Downloads/TV/pack/junk.mkv.!qB',
+        name: 'junk.mkv.!qB',
+        suffix: '.!qb',
+        size: 50,
+        deletable: true,
+        reason: 'orphan_temp_file',
+        owner_hashes: [],
+        owner_names: [],
+      },
+    ]
+    scan.result.temp_file_stats = {
+      temp_files: 2,
+      owned_temp_files: 1,
+      orphan_temp_files: 1,
+      check_failed_temp_files: 0,
+    }
+    const { api } = createPageApi({ scan })
+    mountComponent(Page, { api, pluginId: 'MediaSyncGuard' })
+    await flushPromises()
+
+    clickTab('下载器临时文件')
+    await flushPromises()
+
+    const text = document.body.textContent || ''
+    expect(text).toContain('ep.mkv.!qB')
+    expect(text).toContain('junk.mkv.!qB')
+    expect(text).toContain('属于现存任务')
+    expect(text).toContain('可清理')
+    // 属于现存任务的行复选框必须禁用，无主残留可选
+    const rows = Array.from(document.querySelectorAll('.ms-table tbody tr'))
+    const ownedRow = rows.find(row => (row.textContent || '').includes('ep.mkv.!qB'))
+    const orphanRow = rows.find(row => (row.textContent || '').includes('junk.mkv.!qB'))
+    expect(ownedRow.querySelector('.v-checkbox input').disabled).toBe(true)
+    expect(orphanRow.querySelector('.v-checkbox input').disabled).toBe(false)
+  })
+
   it('cancels a single pending action through the pending/cancel API', async () => {
     const { api } = createPageApi()
     const view = mountComponent(Page, { api, pluginId: 'MediaSyncGuard' })

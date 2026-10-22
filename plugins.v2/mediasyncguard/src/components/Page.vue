@@ -203,6 +203,9 @@ const mediaItems = computed(() => asArray(scanResult.value?.media_without_torren
 const mediaGroups = computed(() => asArray(scanResult.value?.media_groups))
 const torrentItems = computed(() => asArray(scanResult.value?.torrents_without_media))
 const torrentGroups = computed(() => asArray(scanResult.value?.torrent_groups))
+const tempFiles = computed(() => asArray(scanResult.value?.temp_files))
+const tempFileStats = computed(() => asObject(scanResult.value?.temp_file_stats))
+const tempFileErrors = computed(() => asArray(scanResult.value?.temp_file_errors))
 
 // ---------------------------------------------------------------- 待执行动作
 const pendingList = computed(() => asArray(pendingData.value.pending))
@@ -222,9 +225,11 @@ const mediaTypeFilter = ref('all')
 const mediaCategoryFilter = ref('all')
 const torrentSearchText = ref('')
 const torrentCategoryFilter = ref('all')
+const tempFileSearchText = ref('')
 
 const selectedMedia = ref(new Set())
 const selectedTorrents = ref(new Set())
+const selectedTempFiles = ref(new Set())
 
 const normalize = value => String(value ?? '').toLowerCase()
 
@@ -344,6 +349,30 @@ const filteredTorrents = computed(() => {
   })
 })
 
+const filteredTempFiles = computed(() => {
+  const text = normalize(tempFileSearchText.value.trim())
+  return tempFiles.value.filter(item => {
+    if (!text) return true
+    return [
+      item?.path,
+      item?.name,
+      item?.suffix,
+      asArray(item?.owner_names).join(' '),
+      asArray(item?.owner_hashes).join(' '),
+    ].some(value => normalize(value).includes(text))
+  })
+})
+
+const TEMP_REASON_LABELS = {
+  owned_by_torrent: '属于现存任务',
+  orphan_temp_file: '无主残留',
+  owner_check_failed: '归属校验失败',
+}
+
+function tempReasonLabel(reason) {
+  return TEMP_REASON_LABELS[reason] || reason || ''
+}
+
 const selectableMediaIds = computed(() => filteredMedia.value.map(item => item?.id).filter(Boolean))
 const selectableTorrentIds = computed(() => filteredTorrents.value
   .filter(item => !item?.ignored_reason)
@@ -374,6 +403,23 @@ const selectedMediaSize = computed(() => selectedMediaItems.value
 const selectedTorrentSize = computed(() => selectedTorrentItems.value
   .reduce((total, item) => total + asNumber(item?.size), 0))
 
+const selectableTempFileIds = computed(() => filteredTempFiles.value
+  .filter(item => item?.deletable === true)
+  .map(item => item?.id)
+  .filter(Boolean))
+const allTempFilesSelected = computed(() => (
+  selectableTempFileIds.value.length > 0
+  && selectableTempFileIds.value.every(id => selectedTempFiles.value.has(id))
+))
+const someTempFilesSelected = computed(() => (
+  !allTempFilesSelected.value && selectableTempFileIds.value.some(id => selectedTempFiles.value.has(id))
+))
+const selectedTempFileItems = computed(() => tempFiles.value
+  .filter(item => selectedTempFiles.value.has(item?.id)))
+const selectedTempFileCount = computed(() => selectedTempFiles.value.size)
+const selectedTempFileSize = computed(() => selectedTempFileItems.value
+  .reduce((total, item) => total + asNumber(item?.size), 0))
+
 // 扫描结果刷新后清理已不存在的选择，避免提交过期 id
 function pruneSelection(items, selected) {
   const available = new Set(asArray(items).map(item => item?.id).filter(Boolean))
@@ -383,6 +429,7 @@ function pruneSelection(items, selected) {
 
 watch(mediaItems, items => pruneSelection(items, selectedMedia))
 watch(torrentItems, items => pruneSelection(items, selectedTorrents))
+watch(tempFiles, items => pruneSelection(items, selectedTempFiles))
 
 function toggleMediaSelection(id, value) {
   if (!id) return
@@ -418,8 +465,28 @@ function selectAllTorrents(value) {
   selectedTorrents.value = next
 }
 
+function toggleTempFileSelection(id, value) {
+  if (!id) return
+  const row = tempFiles.value.find(item => item?.id === id)
+  if (value && row && row.deletable !== true) return
+  const next = new Set(selectedTempFiles.value)
+  if (value) next.add(id)
+  else next.delete(id)
+  selectedTempFiles.value = next
+}
+
+function selectAllTempFiles(value) {
+  const next = new Set(selectedTempFiles.value)
+  for (const id of selectableTempFileIds.value) {
+    if (value) next.add(id)
+    else next.delete(id)
+  }
+  selectedTempFiles.value = next
+}
+
 function clearSelection(kind) {
   if (kind === 'media') selectedMedia.value = new Set()
+  else if (kind === 'temp_files') selectedTempFiles.value = new Set()
   else selectedTorrents.value = new Set()
 }
 
@@ -635,9 +702,15 @@ const confirmState = reactive({
 const applyResult = ref(null)
 
 function openApplyDialog(kind) {
-  const items = kind === 'media' ? selectedMediaItems.value : selectedTorrentItems.value
+  const items = kind === 'media'
+    ? selectedMediaItems.value
+    : (kind === 'temp_files' ? selectedTempFileItems.value : selectedTorrentItems.value)
   if (!items.length) return
   const warnings = []
+  if (kind === 'temp_files') {
+    const blocked = items.filter(item => item?.deletable !== true)
+    if (blocked.length) warnings.push(`${blocked.length} 个文件仍属于现存任务或归属校验失败，后端会拒绝删除`)
+  }
   const defaults = {
     deleteSidecars: props.initialConfig?.delete_media_sidecars !== false,
     cleanupEmptyDirs: props.initialConfig?.cleanup_empty_dirs !== false,
@@ -656,7 +729,7 @@ function openApplyDialog(kind) {
     }
     const downloading = items.filter(item => item?.reason === 'downloading')
     if (downloading.length) warnings.push(`${downloading.length} 个种子仍在下载中`)
-  } else {
+  } else if (kind === 'media') {
     const noInode = items.filter(item => !asNumber(item?.inode))
     if (noInode.length) warnings.push(`${noInode.length} 个媒体条目缺少 inode，后端会跳过无法校验的条目`)
   }
@@ -667,7 +740,7 @@ function openApplyDialog(kind) {
     ids: items.map(item => item?.id).filter(Boolean),
     total: items.length,
     size: items.reduce((total, item) => total + asNumber(item?.size), 0),
-    preview: items.slice(0, 8).map(candidateName),
+    preview: items.slice(0, 8).map(item => item?.path || candidateName(item)),
     warnings,
     deleteSidecars: defaults.deleteSidecars,
     cleanupEmptyDirs: defaults.cleanupEmptyDirs,
@@ -686,6 +759,7 @@ async function submitApply() {
   setError('action', '')
   try {
     const isMedia = confirmState.kind === 'media'
+    const isTemp = confirmState.kind === 'temp_files'
     const body = isMedia
       ? {
         kind: 'media',
@@ -693,11 +767,13 @@ async function submitApply() {
         delete_sidecars: Boolean(confirmState.deleteSidecars),
         cleanup_empty_dirs: Boolean(confirmState.cleanupEmptyDirs),
       }
-      : {
-        kind: 'torrents',
-        ids: confirmState.ids,
-        delete_files: Boolean(confirmState.deleteFiles),
-      }
+      : (isTemp
+        ? { kind: 'temp_files', ids: confirmState.ids }
+        : {
+          kind: 'torrents',
+          ids: confirmState.ids,
+          delete_files: Boolean(confirmState.deleteFiles),
+        })
     const response = asObject(unwrapResponse(await props.api.post(`${basePath.value}/apply`, body)))
     applyResult.value = {
       success: response.success !== false,
@@ -708,6 +784,7 @@ async function submitApply() {
     }
     if (applyResult.value.success) {
       if (isMedia) selectedMedia.value = new Set()
+      else if (isTemp) selectedTempFiles.value = new Set()
       else selectedTorrents.value = new Set()
       showNotice(applyResult.value.message || `已删除 ${applyResult.value.deleted} 项`)
       await refreshCycle(true)
@@ -1133,6 +1210,10 @@ onBeforeUnmount(() => {
             种子无媒体
             <VChip class="ms-tab-chip" size="x-small" variant="tonal">{{ formatCount(torrentItems.length) }}</VChip>
           </VTab>
+          <VTab value="temp_files">
+            下载器临时文件
+            <VChip class="ms-tab-chip" size="x-small" variant="tonal">{{ formatCount(tempFiles.length) }}</VChip>
+          </VTab>
         </VTabs>
         <VDivider />
 
@@ -1512,6 +1593,148 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </VWindowItem>
+
+          <!-- 下载器临时 / 残留文件 -->
+          <VWindowItem value="temp_files">
+            <div class="ms-tab-body">
+              <div class="ms-filterbar">
+                <VTextField
+                  v-model="tempFileSearchText"
+                  density="compact"
+                  variant="outlined"
+                  label="搜索文件路径 / 归属任务"
+                  prepend-inner-icon="mdi-magnify"
+                  hide-details
+                  clearable
+                  class="ms-search"
+                />
+                <VSpacer />
+                <VBtn
+                  color="primary"
+                  variant="tonal"
+                  prepend-icon="mdi-radar"
+                  :loading="scanning"
+                  :disabled="scanRunning"
+                  @click="startScan"
+                >
+                  扫描
+                </VBtn>
+              </div>
+
+              <div v-if="tempFileErrors.length" class="text-caption text-error mb-1">
+                {{ tempFileErrors.join('；') }}
+              </div>
+
+              <div class="ms-selection-bar">
+                <VCheckbox
+                  :model-value="allTempFilesSelected"
+                  :indeterminate="someTempFilesSelected"
+                  density="compact"
+                  hide-details
+                  label="全选可清理的残留文件"
+                  @update:model-value="selectAllTempFiles"
+                />
+                <span class="text-caption text-medium-emphasis">
+                  显示 {{ formatCount(filteredTempFiles.length) }} / 共 {{ formatCount(tempFiles.length) }} 项 ·
+                  无主 {{ formatCount(tempFileStats.orphan_temp_files) }} ·
+                  属于现存任务 {{ formatCount(tempFileStats.owned_temp_files) }}
+                </span>
+                <VSpacer />
+                <VBtn v-if="selectedTempFileCount" variant="text" size="small" @click="clearSelection('temp_files')">
+                  清除选择
+                </VBtn>
+              </div>
+
+              <VAlert type="info" variant="tonal" density="compact" class="mb-2">
+                这里列出下载目录中带 <code>.!qB</code> / <code>.!ut</code> / <code>.part</code> 等后缀的文件。
+                仍属于现存任务的文件会显示归属并禁止删除；只有“无主残留”可以清理。
+              </VAlert>
+
+              <div v-if="!scanResult && !scanRunning" class="ms-empty text-medium-emphasis">
+                尚未扫描，请先点击“扫描”。
+              </div>
+              <div v-else-if="!tempFiles.length" class="ms-empty text-medium-emphasis">
+                没有发现下载器临时/残留文件。
+              </div>
+              <div v-else-if="!filteredTempFiles.length" class="ms-empty text-medium-emphasis">
+                没有匹配的文件。
+              </div>
+              <div v-else class="ms-table-wrap">
+                <VTable density="compact" hover class="ms-table">
+                  <thead>
+                    <tr>
+                      <th class="ms-col-check">
+                        <VCheckbox
+                          :model-value="allTempFilesSelected"
+                          :indeterminate="someTempFilesSelected"
+                          density="compact"
+                          hide-details
+                          aria-label="全选可清理临时文件"
+                          @update:model-value="selectAllTempFiles"
+                        />
+                      </th>
+                      <th class="text-start">文件</th>
+                      <th class="text-end">大小</th>
+                      <th class="text-start">后缀</th>
+                      <th class="text-start">归属任务</th>
+                      <th class="text-start">状态</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in filteredTempFiles" :key="row.id">
+                      <td>
+                        <VCheckbox
+                          :model-value="selectedTempFiles.has(row.id)"
+                          :disabled="row.deletable !== true"
+                          density="compact"
+                          hide-details
+                          @update:model-value="value => toggleTempFileSelection(row.id, value)"
+                        />
+                      </td>
+                      <td class="ms-path-cell">{{ row.path }}</td>
+                      <td class="text-end">{{ formatSize(row.size) }}</td>
+                      <td>{{ row.suffix }}</td>
+                      <td class="ms-name-cell">
+                        <template v-if="asArray(row.owner_names).length">
+                          {{ asArray(row.owner_names).slice(0, 2).join('；') }}
+                          <span v-if="row.owner_hashes.length > 2" class="text-medium-emphasis">
+                            等 {{ row.owner_hashes.length }} 个任务
+                          </span>
+                        </template>
+                        <span v-else class="text-medium-emphasis">—</span>
+                      </td>
+                      <td>
+                        <VChip size="x-small" :color="row.deletable ? 'success' : 'warning'" variant="tonal">
+                          {{ row.deletable ? '可清理' : tempReasonLabel(row.reason) }}
+                        </VChip>
+                      </td>
+                    </tr>
+                  </tbody>
+                </VTable>
+              </div>
+
+              <div class="ms-action-bar">
+                <span class="text-body-2">
+                  已选择 {{ selectedTempFileCount }} 个文件
+                  <template v-if="selectedTempFileCount">（{{ formatSize(selectedTempFileSize) }}）</template>
+                </span>
+                <VSpacer />
+                <VBtn v-if="selectedTempFileCount" variant="text" size="small" @click="clearSelection('temp_files')">
+                  清除选择
+                </VBtn>
+                <VBtn
+                  color="error"
+                  variant="flat"
+                  size="small"
+                  prepend-icon="mdi-delete"
+                  :disabled="!selectedTempFileCount"
+                  @click="openApplyDialog('temp_files')"
+                >
+                  删除选中临时文件（{{ selectedTempFileCount }}）
+                </VBtn>
+              </div>
+            </div>
+          </VWindowItem>
         </VWindow>
       </VCard>
     </div>
@@ -1520,14 +1743,23 @@ onBeforeUnmount(() => {
     <VDialog v-model="confirmState.open" max-width="680" persistent>
       <VCard>
         <VCardTitle class="d-flex align-center">
-          <VIcon :icon="confirmState.kind === 'media' ? 'mdi-filmstrip' : 'mdi-download'" class="me-2" />
-          {{ confirmState.kind === 'media' ? '删除选中媒体' : '删除选中种子' }}
+          <VIcon
+            :icon="confirmState.kind === 'media'
+              ? 'mdi-filmstrip'
+              : (confirmState.kind === 'temp_files' ? 'mdi-file-remove' : 'mdi-download')"
+            class="me-2"
+          />
+          {{ confirmState.kind === 'media'
+            ? '删除选中媒体'
+            : (confirmState.kind === 'temp_files' ? '删除选中临时文件' : '删除选中种子') }}
         </VCardTitle>
         <VCardText>
           <template v-if="!applyResult">
             <div class="text-body-1 mb-2">
               即将删除 <strong>{{ confirmState.total }}</strong>
-              项{{ confirmState.kind === 'media' ? '媒体条目' : '种子' }}（合计 {{ formatSize(confirmState.size) }}），操作不可撤销。
+              {{ confirmState.kind === 'media'
+                ? '项媒体条目'
+                : (confirmState.kind === 'temp_files' ? '个临时文件' : '个种子') }}（合计 {{ formatSize(confirmState.size) }}），操作不可撤销。
             </div>
             <VAlert v-if="dryRun" type="info" variant="tonal" density="compact" class="mb-2">
               当前为演练模式：监控产生的自动动作不会执行，但本次手动确认的删除会立即执行。
@@ -1564,6 +1796,11 @@ onBeforeUnmount(() => {
                 hide-details
                 label="清理删除后产生的空目录"
               />
+            </template>
+            <template v-else-if="confirmState.kind === 'temp_files'">
+              <div class="text-caption text-medium-emphasis">
+                只删除后端已确认无主的残留文件；仍属于现存下载任务或归属校验失败的文件会被拒绝。
+              </div>
             </template>
             <template v-else>
               <VCheckbox

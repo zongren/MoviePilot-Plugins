@@ -601,6 +601,27 @@ class QbittorrentApi:
         )
 
     # ------------------------------------------------------------------ 删除
+    def list_files(self, torrent_hash: str) -> Optional[List[str]]:
+        """读取某个种子的文件相对路径清单；失败返回 None（由调用方降级处理）。"""
+        if self.client is None or not torrent_hash:
+            return None
+        get_files = getattr(self.client, "get_files", None)
+        if not callable(get_files):
+            return None
+        try:
+            files = get_files(str(torrent_hash))
+        except Exception as err:  # noqa: BLE001
+            logger.warning(f"qBittorrent「{self.name}」读取种子 {torrent_hash} 文件清单失败：{err}")
+            return None
+        names: List[str] = []
+        for item in files or []:
+            name = getattr(item, "name", None)
+            if name is None and isinstance(item, dict):
+                name = item.get("name")
+            if name:
+                names.append(str(name))
+        return names
+
     def delete_torrents(self, hashes: List[str], delete_files: bool) -> Tuple[bool, str]:
         """删除种子；``delete_files`` 决定是否同时删除下载文件。"""
         if self.client is None:
