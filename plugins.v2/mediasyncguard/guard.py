@@ -726,7 +726,22 @@ SKIPPED_DEFAULTS: Dict[str, int] = {
     "ignored": 0,
     "missing_path": 0,
     "unsupported": 0,
+    # 命中 scan_ignore_keywords 而被排除的条目数（媒体+种子）
+    "ignored_keyword": 0,
 }
+
+
+def _scan_keyword_ignored(config: PluginConfig, *values: Any) -> bool:
+    """判断给定路径/名称是否命中配置的扫描忽略关键词（不区分大小写）。"""
+    keywords = [
+        str(item).strip().casefold()
+        for item in (getattr(config, "scan_ignore_keywords", None) or [])
+        if str(item).strip()
+    ]
+    if not keywords:
+        return False
+    text = "\n".join(str(value or "") for value in values).casefold()
+    return any(keyword in text for keyword in keywords)
 
 STATS_DEFAULTS: Dict[str, int] = {
     "media_total": 0,
@@ -809,12 +824,18 @@ def build_scan(
         if hashed and hashed not in hashes:
             hashes.append(hashed)
 
+    # 扫描跳过统计（媒体关键词过滤在媒体循环里就会用到，因此提前初始化）
+    skipped = dict(SKIPPED_DEFAULTS)
+
     # 无种子关联的媒体（路径不可见的条目也列出，便于人工判断；安全删除由 recheck 兜底）
     media_without_torrent: List[Dict[str, Any]] = []
     for media in snapshot.media.values():
         if media is None:
             continue
         if links.torrents_of(media):
+            continue
+        if _scan_keyword_ignored(config, media.path, media.folder):
+            skipped["ignored_keyword"] += 1
             continue
         path_key = _normalize_media_path(media.path)
         media_without_torrent.append(
@@ -839,14 +860,18 @@ def build_scan(
         )
     media_without_torrent.sort(key=lambda row: (row["folder"], row["path"], row["id"]))
 
-    # 无媒体关联的种子 / 各类跳过统计
-    skipped = dict(SKIPPED_DEFAULTS)
+    # 无媒体关联的种子
     torrents_without_media: List[Dict[str, Any]] = []
     for key in sorted(snapshot.torrents.keys()):
         torrent = snapshot.torrents.get(key)
         if torrent is None:
             continue
         ignored_reason = is_ignored(torrent, config) or ""
+        if _scan_keyword_ignored(
+            config, torrent.name, torrent.content_path, torrent.save_path
+        ):
+            skipped["ignored_keyword"] += 1
+            continue
         if torrent.unsupported_path:
             skipped["unsupported"] += 1
             continue

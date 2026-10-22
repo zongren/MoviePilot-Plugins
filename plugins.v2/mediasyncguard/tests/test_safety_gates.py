@@ -313,6 +313,62 @@ class ManualApplySafetyTest(T.ScanAndApplyTest):
         self.assertEqual(self.jellyfin.deleted, [])
 
 
+class ScanIgnoreKeywordTest(unittest.TestCase):
+    """一次性扫描忽略关键词：转码/重新压制后无硬链接的内容可按业务关系隐藏。"""
+
+    def _snapshot_and_links(self, media_path, torrent_name, torrent_path):
+        media = MediaItem(
+            server="Jellyfin",
+            item_id="m1",
+            path=media_path,
+            inode=83256,
+            dev=58,
+            item_type="Episode",
+            series_name="老友记",
+            season=0,
+            episode=1,
+        )
+        torrent = TorrentItem(
+            downloader="主QB",
+            hash="abc",
+            name=torrent_name,
+            save_path="/medias/Downloads/Others",
+            content_path=torrent_path,
+            progress=1.0,
+            size=1,
+        )
+        snapshot = Snapshot(media={media.key: media}, torrents={torrent.key: torrent})
+        links = REAL_LINKER.LinkIndex()
+        # 让种子有视频 inode 但没有任何媒体 inode 关联（模拟“无关联”状态）
+        links.add_torrent_inode((58, 99999), torrent)
+        return snapshot, links
+
+    def test_keywords_hide_media_and_torrent_rows(self):
+        snapshot, links = self._snapshot_and_links(
+            "/medias/TV/老友记 (1994)/Specials/老友记 - S00E001.mkv",
+            "Friends Bonus Disc (2024)",
+            "/medias/Downloads/Others/Friends Bonus Disc (2024)",
+        )
+        config = PluginConfig(
+            scan_ignore_keywords=["Friends Bonus Disc", "老友记 (1994)/Specials"]
+        )
+        result = REAL_GUARD.build_scan(config, snapshot, links)
+        self.assertEqual(result["media_without_torrent"], [])
+        self.assertEqual(result["torrents_without_media"], [])
+        self.assertEqual(result["skipped"]["ignored_keyword"], 2)
+
+    def test_without_keywords_rows_are_reported(self):
+        snapshot, links = self._snapshot_and_links(
+            "/medias/TV/老友记 (1994)/Specials/老友记 - S00E001.mkv",
+            "Friends Bonus Disc (2024)",
+            "/medias/Downloads/Others/Friends Bonus Disc (2024)",
+        )
+        result = REAL_GUARD.build_scan(PluginConfig(), snapshot, links)
+        self.assertEqual(len(result["media_without_torrent"]), 1)
+        self.assertEqual(len(result["torrents_without_media"]), 1)
+        self.assertEqual(result["skipped"]["ignored_keyword"], 0)
+
+
 class JellyfinPaginationGateTest(unittest.TestCase):
     """M3：分页短页但 TotalRecordCount 未取完 → 必须抛 ClientError。"""
 

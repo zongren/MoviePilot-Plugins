@@ -1234,7 +1234,7 @@ class BuildScanTest(unittest.TestCase):
         skipped = self.scan()["skipped"]
         self.assertEqual(
             skipped,
-            {"downloading": 1, "no_video": 1, "ignored": 1, "missing_path": 1, "unsupported": 1},
+            {"downloading": 1, "no_video": 1, "ignored": 1, "missing_path": 1, "unsupported": 1, "ignored_keyword": 0},
         )
 
     def test_torrent_groups(self):

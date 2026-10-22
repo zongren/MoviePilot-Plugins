@@ -136,6 +136,9 @@ class PluginConfig:
     cleanup_empty_dirs: bool = True
     clean_moviepilot_history: bool = True
     scan_include_unfinished: bool = False
+    # 一次性扫描忽略关键词：匹配媒体路径/目录或种子名称/内容路径的行不会出现在扫描结果中
+    # （用于转码/重新压制后不再有硬链接、但业务上有关联的内容）
+    scan_ignore_keywords: List[str] = field(default_factory=list)
     keep_history_actions: int = 50
 
     @property
@@ -181,6 +184,7 @@ class PluginConfig:
             cleanup_empty_dirs=_as_bool(data.get("cleanup_empty_dirs"), True),
             clean_moviepilot_history=_as_bool(data.get("clean_moviepilot_history"), True),
             scan_include_unfinished=_as_bool(data.get("scan_include_unfinished"), False),
+            scan_ignore_keywords=_as_str_list(data.get("scan_ignore_keywords")),
             keep_history_actions=_as_int(data.get("keep_history_actions"), 50, minimum=0, maximum=1000),
         )
         return config

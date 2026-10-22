@@ -544,6 +544,27 @@ class MediaSyncGuard(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "scan_ignore_keywords",
+                                            "label": "扫描忽略关键词",
+                                            "placeholder": "例如：Friends Bonus Disc,老友记 (1994)/Specials",
+                                            "hint": "逗号分隔；匹配媒体路径/目录或种子名称/内容路径的行不会出现在一次性扫描结果中（用于转码/重新压制后无硬链接但业务上有关联的内容）",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
