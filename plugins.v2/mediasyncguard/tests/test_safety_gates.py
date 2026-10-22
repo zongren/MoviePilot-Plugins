@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import pathlib
 import sys
 import time
@@ -284,12 +285,27 @@ class ManualApplySafetyTest(T.ScanAndApplyTest):
         self._seed_live_state(media_rows=[row])
         return row
 
-    def test_manual_media_apply_blocked_when_downloaders_unverifiable(self):
+    def test_manual_media_apply_allowed_when_all_hardlinks_are_visible(self):
+        """下载器不可校验，但 nlink 能被可见引用完全解释时允许手动删媒体（转码衍生内容）。"""
         row = self._movie_row()
         self.runtime._downloaders_verifiable = False
         response = self.runtime.apply_scan_selection({"kind": "media", "ids": [row["id"]]})
+        self.assertTrue(response["success"], response)
+        self.assertIn(row["item_id"], self.jellyfin.deleted)
+
+    def test_manual_media_apply_blocked_when_unknown_hardlink_exists(self):
+        row = self._movie_row()
+        extra_link = self.media_root / "hidden-extra-link.mkv"
+        os.link(row["path"], extra_link)
+        try:
+            response = self.runtime.apply_scan_selection({"kind": "media", "ids": [row["id"]]})
+        finally:
+            os.unlink(extra_link)
         self.assertFalse(response["success"], response)
-        self.assertIn("拒绝手动删除媒体", response["message"])
+        self.assertTrue(
+            any("无法校验的硬链接" in item["error"] for item in response["failed"]),
+            response["failed"],
+        )
         self.assertEqual(self.jellyfin.deleted, [])
 
     def test_manual_media_apply_blocked_when_live_inode_missing(self):

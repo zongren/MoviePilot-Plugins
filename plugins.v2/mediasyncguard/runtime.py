@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -1806,17 +1807,6 @@ class SyncRuntime:
         del state_module, linker_module
 
         if kind == "media":
-            if not getattr(self, "_downloaders_verifiable", False):
-                return {
-                    "success": False,
-                    "deleted": 0,
-                    "failed": [],
-                    "warnings": [],
-                    "message": (
-                        "存在数据目录不可见或未纳入监控的下载器，无法校验媒体文件是否仍被其它种子引用；"
-                        "已拒绝手动删除媒体。请先解决下载器数据可见性，或仅清理种子任务。"
-                    ),
-                }
             return self._apply_media_ids(ids, payload, result, links, guard_module)
         return self._apply_torrent_ids(ids, payload, result, links, guard_module)
 
@@ -1892,6 +1882,44 @@ class SyncRuntime:
                 continue
             if not path or not is_safe_delete_target(path, config):
                 failed.append({"id": item_id, "error": "媒体路径不在允许删除的目录内"})
+                continue
+            # 同一路径被其它媒体条目引用时不能删除（删除文件会让另一个条目失效）
+            try:
+                other_same_path = any(
+                    item.key != live_media.key and item.path == live_media.path
+                    for item in self._snapshot.media.values()
+                )
+            except Exception:  # noqa: BLE001
+                other_same_path = True
+            if other_same_path:
+                failed.append(
+                    {"id": item_id, "error": "同一文件路径仍被其它 Jellyfin 条目引用，已跳过"}
+                )
+                continue
+            # 硬链接引用校验：文件的 nlink 必须能被“当前可见的媒体/种子引用”完全解释；
+            # 若 nlink 更大，说明存在无法校验的硬链接（例如未纳管下载器），保守拒绝。
+            try:
+                nlink = int(os.stat(path).st_nlink)
+            except OSError as err:
+                failed.append({"id": item_id, "error": f"无法读取媒体文件状态：{err}"})
+                continue
+            visible_media_refs = sum(
+                1
+                for item in self._snapshot.media.values()
+                if item.inode_key == live_media.inode_key
+            )
+            visible_torrent_refs = len(links.current_torrents_of_inode(live_media.inode_key))
+            known_refs = visible_media_refs + visible_torrent_refs
+            if nlink > known_refs:
+                failed.append(
+                    {
+                        "id": item_id,
+                        "error": (
+                            f"文件存在无法校验的硬链接（nlink={nlink}，"
+                            f"可见引用={known_refs}），已跳过"
+                        ),
+                    }
+                )
                 continue
             api = self._find_jellyfin(server)
             if api is None:
