@@ -29,7 +29,7 @@ class MediaSyncGuard(_PluginBase):
     # 插件图标
     plugin_icon = "mediasyncguard.png"
     # 插件版本
-    plugin_version = "1.0.0"
+    plugin_version = "1.0.1"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -219,7 +219,7 @@ class MediaSyncGuard(_PluginBase):
                                             "multiple": True,
                                             "chips": True,
                                             "clearable": True,
-                                            "hint": "留空则使用 MoviePilot 默认下载器；副QB 数据目录若未挂载到 MoviePilot，将无法精确关联",
+                                            "hint": "留空则使用 MoviePilot 默认下载器；未纳入监控/数据目录不可见的下载器会禁用自动删媒体，但删种时仍会按可见种子/媒体的共享关系保护下载文件",
                                             "persistent-hint": True,
                                         },
                                     }

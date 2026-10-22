@@ -422,7 +422,7 @@ class SyncRuntime:
             warnings.append(
                 "存在未纳入监控的下载器（"
                 + "、".join(sorted(unselected_configured))
-                + "），无法校验其共享文件；已禁用自动删文件/自动删媒体"
+                + "），无法校验其共享文件；已禁用自动删媒体（删种子时仍按可见种子/媒体的共享关系保护文件）"
             )
         unselected_media_servers = set(self._configured_media_servers) - set(
             self._expected_media_servers
@@ -706,7 +706,7 @@ class SyncRuntime:
             if total == 0:
                 warnings.append(
                     f"下载器「{api.name}」本轮未读取到任何任务，无法校验文件共享；"
-                    f"已禁用自动删文件/自动删媒体"
+                    f"已禁用自动删媒体（删种子时仍按可见共享关系保护文件）"
                 )
                 verifiable = False
                 continue
@@ -717,7 +717,7 @@ class SyncRuntime:
             if ratio > MAX_UNVERIFIABLE_DOWNLOADER_RATIO:
                 warnings.append(
                     f"下载器「{api.name}」有 {unknown}/{total} 个任务路径不可见或内容缺失"
-                    f"（{ratio:.1%}），无法校验文件共享；已禁用自动删文件/自动删媒体"
+                    f"（{ratio:.1%}），无法校验文件共享；已禁用自动删媒体（删种子时仍会按可见共享关系保护文件）"
                 )
                 verifiable = False
         return verifiable, warnings
@@ -916,7 +916,7 @@ class SyncRuntime:
             verify_warnings.append(
                 "存在未纳入监控的下载器（"
                 + "、".join(unselected_downloaders)
-                + "），无法校验其共享文件；已禁用自动删文件/自动删媒体"
+                + "），无法校验其共享文件；已禁用自动删媒体（删种子时仍按可见种子/媒体的共享关系保护文件）"
             )
         # M-E：存在未纳入监控的 Jellyfin（含在 MoviePilot 中被临时禁用但仍在运行的实例）
         # 时，无法证明媒体在其它服务器上不存在，自动删种必须停用。
@@ -931,7 +931,10 @@ class SyncRuntime:
                 + "），无法确认媒体是否已在其它服务器移除；已禁用自动删种"
             )
         warnings.extend(verify_warnings)
-        file_deletion_safe = bool(downloaders_verifiable and not fetch_partial)
+        # 删文件仅依赖“可见种子/媒体是否引用同一 inode”的检查；未纳管的下载器
+        # 使用独立数据目录时不会与本地删除路径冲突（跨目录硬链接只会少一个链接，数据仍在）。
+        # 因此这里只要求本轮数据覆盖完整，不再因下载器不可校验而全局禁止删文件。
+        file_deletion_safe = not fetch_partial
         actions_allowed = bool(getattr(self._config, "enabled", False)) and not self._stopping
         exec_config = self._config
         overrides: Dict[str, Any] = {}
@@ -942,7 +945,7 @@ class SyncRuntime:
                 auto_delete_files=False,
             )
         if not downloaders_verifiable:
-            overrides.update(auto_torrent_to_media=False, auto_delete_files=False)
+            overrides.update(auto_torrent_to_media=False)
         if not media_to_torrent_verifiable:
             overrides.update(auto_media_to_torrent=False)
         if overrides:
@@ -1275,11 +1278,6 @@ class SyncRuntime:
                 continue
             key = torrent_key(downloader, torrent_hash)
             requested = bool(entry.get("delete_files", False))
-            if requested and not getattr(self, "_file_deletion_safe", False):
-                warnings.append(
-                    f"{torrent_hash} 因下载器共享关系无法校验，已保留下载文件"
-                )
-                requested = False
             safe = False
             if requested:
                 try:
@@ -1956,6 +1954,11 @@ class SyncRuntime:
         deleted = 0
         failed: List[Dict[str, str]] = []
         warnings: List[str] = []
+        if request_delete_files and not getattr(self, "_downloaders_verifiable", False):
+            warnings.append(
+                "存在未纳入监控的下载器：删除文件仅按可见种子/媒体的共享关系校验，"
+                "其它下载器若引用相同物理路径需自行确认"
+            )
         deleted_ids: List[str] = []
         for item_id in ids:
             row = rows.get(item_id)
@@ -1989,9 +1992,6 @@ class SyncRuntime:
                 warnings.append(f"{torrent_hash} 当前仍有媒体关联，已跳过")
                 continue
             delete_files = request_delete_files
-            if delete_files and not getattr(self, "_file_deletion_safe", False):
-                delete_files = False
-                warnings.append(f"{torrent_hash} 因下载器共享关系无法校验，已保留下载文件")
             if delete_files:
                 try:
                     safe = bool(guard_module.safe_delete_files_map([key], links).get(key, False))

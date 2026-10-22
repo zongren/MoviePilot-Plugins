@@ -87,7 +87,7 @@ class CoverageGateTest(T.RuntimeTestBase):
 class UnverifiableDownloaderGateTest(T.RuntimeTestBase):
     """H2：下载器路径不可见/未纳管时禁止自动删媒体与删文件。"""
 
-    def test_invisible_downloader_disables_media_delete_and_file_delete(self):
+    def test_invisible_downloader_disables_media_delete_but_not_visible_file_checks(self):
         invisible = TorrentItem(
             downloader="主QB",
             hash="abc",
@@ -99,12 +99,13 @@ class UnverifiableDownloaderGateTest(T.RuntimeTestBase):
         self.qb.torrents = [invisible]
         summary = self.runtime.poll_once()
         self.assertFalse(self.runtime._downloaders_verifiable)
-        self.assertFalse(self.runtime._file_deletion_safe)
+        # 删文件只依赖可见种子/媒体的 inode 共享检查；数据源覆盖完整时允许删除
+        self.assertTrue(self.runtime._file_deletion_safe)
         self.assertFalse(summary["partial"], summary)
         status = self.runtime.get_status()
         self.assertFalse(status["coverage"]["downloaders_verifiable"])
-        self.assertFalse(status["coverage"]["file_deletion_safe"])
-        self.assertTrue(any("无法校验文件共享" in w for w in status["warnings"]), status["warnings"])
+        self.assertTrue(status["coverage"]["file_deletion_safe"])
+        self.assertTrue(any("已禁用自动删媒体" in w for w in status["warnings"]), status["warnings"])
 
     def test_unselected_enabled_downloader_also_blocks_file_and_media_deletion(self):
         clients_module = T.clients_module
@@ -131,7 +132,6 @@ class UnverifiableDownloaderGateTest(T.RuntimeTestBase):
             runtime._pending = [action]
             runtime.poll_once()
             self.assertFalse(runtime._downloaders_verifiable)
-            self.assertFalse(runtime._file_deletion_safe)
             self.assertIn(action, runtime._pending)
             self.assertEqual(self.jellyfin.deleted, [])
         finally:
@@ -158,7 +158,8 @@ class UnverifiableDownloaderGateTest(T.RuntimeTestBase):
         self.assertTrue(T.PLAN_CALLS, "本轮应仍执行 plan_cycle 以提供候选展示")
         planned_config = T.PLAN_CALLS[-1]["args"][0]
         self.assertFalse(planned_config.auto_torrent_to_media)
-        self.assertFalse(planned_config.auto_delete_files)
+        # 删文件不再被“下载器不可校验”全局禁止，仍由每个种子的可见共享检查决定
+        self.assertTrue(planned_config.auto_delete_files)
 
 
 class DisabledPollGateTest(T.RuntimeTestBase):
@@ -226,7 +227,7 @@ class UnmonitoredServiceGateTest(T.RuntimeTestBase):
             T.runtime_module.resolve_service_selection = original
         super().tearDown()
 
-    def test_configured_but_disabled_downloader_blocks_file_deletion(self):
+    def test_configured_but_disabled_downloader_disables_auto_media_delete(self):
         clients_module = T.clients_module
         self._patch_selection(
             clients_module.ServiceSelection(
@@ -242,7 +243,7 @@ class UnmonitoredServiceGateTest(T.RuntimeTestBase):
         runtime = self._new_runtime(self.config)
         runtime.poll_once()
         self.assertFalse(runtime._downloaders_verifiable)
-        self.assertFalse(runtime._file_deletion_safe)
+        self.assertTrue(runtime._file_deletion_safe)
         self.assertTrue(any("未纳入监控的下载器" in w for w in runtime.get_status()["warnings"]))
 
     def test_unmonitored_second_jellyfin_blocks_torrent_deletion(self):
@@ -303,6 +304,18 @@ class ManualApplySafetyTest(T.ScanAndApplyTest):
         self.assertFalse(response["success"], response)
         self.assertTrue(any("无法校验媒体文件 inode" in item["error"] for item in response["failed"]))
         self.assertEqual(self.jellyfin.deleted, [])
+
+    def test_manual_torrent_apply_deletes_files_when_visible_checks_pass(self):
+        rows = [self._torrent_row("abc")]
+        self._run_scan(self._result(torrent_rows=rows))
+        self._seed_live_state(torrent_rows=rows)
+        self.runtime._downloaders_verifiable = False
+        response = self.runtime.apply_scan_selection(
+            {"kind": "torrents", "ids": ["主QB|abc"], "delete_files": True}
+        )
+        self.assertTrue(response["success"], response)
+        self.assertEqual(self.qb.delete_calls[0]["delete_files"], True)
+        self.assertTrue(any("未纳入监控的下载器" in warning for warning in response["warnings"]))
 
     def test_manual_apply_rejected_when_coverage_incomplete(self):
         row = self._movie_row()
