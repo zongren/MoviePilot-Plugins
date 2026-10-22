@@ -219,6 +219,7 @@ const showHistory = ref(false)
 const activeTab = ref('media')
 const mediaSearchText = ref('')
 const mediaTypeFilter = ref('all')
+const mediaCategoryFilter = ref('all')
 const torrentSearchText = ref('')
 const torrentCategoryFilter = ref('all')
 
@@ -239,23 +240,78 @@ const mediaTypeOptions = computed(() => {
   ]
 })
 
-const torrentCategoryOptions = computed(() => {
-  const categories = []
-  for (const item of torrentItems.value) {
-    const category = String(item?.category || '')
-    if (category && !categories.includes(category)) categories.push(category)
+// 分类筛选列表：点击只筛选列表，不改变已勾选条目
+const mediaCategoryOptions = computed(() => {
+  const options = []
+  const seen = new Set()
+  for (const group of mediaGroups.value) {
+    const ids = mediaGroupIds(group)
+    if (!ids.length) continue
+    const value = String(group?.group_id || group?.folder || group?.title || ids[0])
+    if (seen.has(value)) continue
+    seen.add(value)
+    options.push({
+      value,
+      title: group?.title || group?.folder || group?.group_id || '未命名分类',
+      count: ids.length,
+      ids,
+    })
   }
-  return [
-    { title: '全部分类', value: 'all' },
-    ...categories.map(category => ({ title: category, value: category })),
-  ]
+  options.sort((left, right) => String(left.title).localeCompare(String(right.title), 'zh-CN'))
+  return [{ value: 'all', title: '全部', count: mediaItems.value.length, ids: [] }, ...options]
+})
+
+const torrentCategoryOptions = computed(() => {
+  const options = []
+  const seen = new Set()
+  for (const group of torrentGroups.value) {
+    const raw = String(group?.group_id || '')
+    const value = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : String(group?.title || raw)
+    if (!value || seen.has(value)) continue
+    seen.add(value)
+    options.push({
+      value,
+      title: group?.title || value,
+      count: asNumber(group?.count) || torrentGroupIds(group).length,
+    })
+  }
+  if (!options.length) {
+    for (const item of torrentItems.value) {
+      const category = String(item?.category || '')
+      if (!category || seen.has(category)) continue
+      seen.add(category)
+      options.push({ value: category, title: category, count: 0 })
+    }
+  }
+  options.sort((left, right) => String(left.title).localeCompare(String(right.title), 'zh-CN'))
+  return [{ value: 'all', title: '全部', count: torrentItems.value.length }, ...options]
+})
+
+const mediaCategoryIdSet = computed(() => {
+  const option = mediaCategoryOptions.value.find(item => item.value === mediaCategoryFilter.value)
+  return new Set(asArray(option?.ids))
+})
+
+watch(mediaCategoryOptions, options => {
+  if (!options.some(option => option.value === mediaCategoryFilter.value)) {
+    mediaCategoryFilter.value = 'all'
+  }
+})
+
+watch(torrentCategoryOptions, options => {
+  if (!options.some(option => option.value === torrentCategoryFilter.value)) {
+    torrentCategoryFilter.value = 'all'
+  }
 })
 
 const filteredMedia = computed(() => {
   const text = normalize(mediaSearchText.value.trim())
   const type = mediaTypeFilter.value
+  const category = mediaCategoryFilter.value
+  const categoryIds = mediaCategoryIdSet.value
   return mediaItems.value.filter(item => {
     if (type !== 'all' && String(item?.item_type || '') !== type) return false
+    if (category !== 'all' && !categoryIds.has(item?.id)) return false
     if (!text) return true
     return [
       item?.display_title,
@@ -387,51 +443,6 @@ function torrentGroupIds(group) {
     return String(item?.category || '') === raw
   }).map(item => item?.id).filter(Boolean)
 }
-
-function groupSelection(ids, selected) {
-  const available = asArray(ids).filter(Boolean)
-  const count = available.filter(id => selected.has(id)).length
-  return {
-    total: available.length,
-    count,
-    checked: available.length > 0 && count === available.length,
-    indeterminate: count > 0 && count < available.length,
-  }
-}
-
-function selectGroup(kind, ids, value) {
-  const available = asArray(ids).filter(Boolean)
-  if (!available.length) return
-  if (kind === 'media') {
-    const next = new Set(selectedMedia.value)
-    for (const id of available) {
-      if (value) next.add(id)
-      else next.delete(id)
-    }
-    selectedMedia.value = next
-  } else {
-    const next = new Set(selectedTorrents.value)
-    for (const id of available) {
-      if (value) next.add(id)
-      else next.delete(id)
-    }
-    selectedTorrents.value = next
-  }
-}
-
-const mediaGroupStates = computed(() => mediaGroups.value
-  .map(group => {
-    const ids = mediaGroupIds(group)
-    return { group, ids, selection: groupSelection(ids, selectedMedia.value) }
-  })
-  .filter(entry => entry.ids.length > 0))
-
-const torrentGroupStates = computed(() => torrentGroups.value
-  .map(group => {
-    const ids = torrentGroupIds(group)
-    return { group, ids, selection: groupSelection(ids, selectedTorrents.value) }
-  })
-  .filter(entry => entry.ids.length > 0))
 
 // ---------------------------------------------------------------- 展示辅助
 function itemTypeLabel(type) {
@@ -1162,28 +1173,22 @@ onBeforeUnmount(() => {
                 </VBtn>
               </div>
 
-              <div v-if="mediaGroupStates.length" class="ms-groups">
-                <div class="text-caption text-medium-emphasis mb-1">按分组整组选择</div>
-                <div class="ms-group-list">
-                  <div
-                    v-for="entry in mediaGroupStates"
-                    :key="entry.group.group_id || entry.group.title"
-                    class="ms-group-item"
+              <div v-if="mediaCategoryOptions.length > 1" class="ms-category-panel">
+                <div class="text-caption text-medium-emphasis mb-1">选择分类（仅筛选列表，不改变已勾选条目）</div>
+                <div class="ms-category-list" role="listbox" aria-label="媒体分类筛选">
+                  <button
+                    v-for="option in mediaCategoryOptions"
+                    :key="option.value"
+                    type="button"
+                    class="ms-category-item"
+                    :class="{ 'ms-category-item--active': mediaCategoryFilter === option.value }"
+                    role="option"
+                    :aria-selected="mediaCategoryFilter === option.value"
+                    @click="mediaCategoryFilter = option.value"
                   >
-                    <VCheckbox
-                      :model-value="entry.selection.checked"
-                      :indeterminate="entry.selection.indeterminate"
-                      density="compact"
-                      hide-details
-                      @update:model-value="value => selectGroup('media', entry.ids, value)"
-                    />
-                    <div class="ms-group-label">
-                      <div class="text-body-2">{{ entry.group.title || entry.group.group_id }}</div>
-                      <div class="text-caption text-medium-emphasis">
-                        {{ entry.selection.count }} / {{ entry.selection.total }} 项 · {{ formatSize(entry.group.size) }}
-                      </div>
-                    </div>
-                  </div>
+                    <span class="ms-category-title">{{ option.title }}</span>
+                    <span class="ms-category-count">{{ formatCount(option.count) }}</span>
+                  </button>
                 </div>
               </div>
 
@@ -1324,15 +1329,6 @@ onBeforeUnmount(() => {
                   clearable
                   class="ms-search"
                 />
-                <VSelect
-                  v-model="torrentCategoryFilter"
-                  :items="torrentCategoryOptions"
-                  density="compact"
-                  variant="outlined"
-                  label="分类"
-                  hide-details
-                  class="ms-select"
-                />
                 <VSpacer />
                 <VBtn
                   color="primary"
@@ -1346,28 +1342,22 @@ onBeforeUnmount(() => {
                 </VBtn>
               </div>
 
-              <div v-if="torrentGroupStates.length" class="ms-groups">
-                <div class="text-caption text-medium-emphasis mb-1">按分组整组选择</div>
-                <div class="ms-group-list">
-                  <div
-                    v-for="entry in torrentGroupStates"
-                    :key="entry.group.group_id || entry.group.title"
-                    class="ms-group-item"
+              <div v-if="torrentCategoryOptions.length > 1" class="ms-category-panel">
+                <div class="text-caption text-medium-emphasis mb-1">选择分类（仅筛选列表，不改变已勾选条目）</div>
+                <div class="ms-category-list" role="listbox" aria-label="种子分类筛选">
+                  <button
+                    v-for="option in torrentCategoryOptions"
+                    :key="option.value"
+                    type="button"
+                    class="ms-category-item"
+                    :class="{ 'ms-category-item--active': torrentCategoryFilter === option.value }"
+                    role="option"
+                    :aria-selected="torrentCategoryFilter === option.value"
+                    @click="torrentCategoryFilter = option.value"
                   >
-                    <VCheckbox
-                      :model-value="entry.selection.checked"
-                      :indeterminate="entry.selection.indeterminate"
-                      density="compact"
-                      hide-details
-                      @update:model-value="value => selectGroup('torrents', entry.ids, value)"
-                    />
-                    <div class="ms-group-label">
-                      <div class="text-body-2">{{ entry.group.title || entry.group.group_id }}</div>
-                      <div class="text-caption text-medium-emphasis">
-                        {{ entry.selection.count }} / {{ entry.selection.total }} 项 · {{ formatSize(entry.group.size) }}
-                      </div>
-                    </div>
-                  </div>
+                    <span class="ms-category-title">{{ option.title }}</span>
+                    <span class="ms-category-count">{{ formatCount(option.count) }}</span>
+                  </button>
                 </div>
               </div>
 
@@ -1703,59 +1693,109 @@ onBeforeUnmount(() => {
   min-width: 140px;
 }
 
-.ms-groups {
+.ms-tab-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.ms-category-panel {
   background: rgba(var(--v-theme-on-surface), 0.03);
   border-radius: 8px;
-  margin-bottom: 12px;
-  padding: 10px 12px;
+  flex: 0 0 auto;
+  margin-bottom: 10px;
+  padding: 8px 10px 6px;
 }
 
-.ms-group-list {
+.ms-category-list {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 20px;
-  max-height: 168px;
-  overflow-y: auto;
+  gap: 8px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }
 
-.ms-group-item {
+.ms-category-item {
   align-items: center;
-  display: flex;
-  gap: 6px;
-  max-width: 360px;
-  min-width: 200px;
+  background: transparent;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.18);
+  border-radius: 999px;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 0.85rem;
+  gap: 8px;
+  line-height: 1.4;
+  padding: 4px 12px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  white-space: nowrap;
 }
 
-.ms-group-label {
-  min-width: 0;
+.ms-category-item:hover {
+  background: rgba(var(--v-theme-on-surface), 0.06);
+}
+
+.ms-category-item--active {
+  background: rgba(var(--v-theme-primary), 0.12);
+  border-color: rgb(var(--v-theme-primary));
+  color: rgb(var(--v-theme-primary));
+  font-weight: 600;
+}
+
+.ms-category-count {
+  font-size: 0.72rem;
+  opacity: 0.65;
 }
 
 .ms-selection-bar {
   align-items: center;
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 8px;
-  margin-bottom: 10px;
-}
-
-.ms-action-bar {
-  align-items: center;
-  background: rgba(var(--v-theme-on-surface), 0.03);
-  border-radius: 8px;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 8px 10px;
+  margin-bottom: 8px;
 }
 
 .ms-table-wrap {
-  overflow-x: auto;
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.08);
+  border-radius: 8px;
+  flex: 1 1 auto;
+  max-height: min(56vh, 720px);
+  min-height: 220px;
+  overflow: auto;
+  overscroll-behavior: contain;
   width: 100%;
 }
 
 .ms-table {
   min-width: 820px;
+}
+
+/* 表头在列表内部滚动时保持可见 */
+.ms-table :deep(thead th) {
+  background: rgb(var(--v-theme-surface));
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.ms-action-bar {
+  align-items: center;
+  background: rgb(var(--v-theme-surface));
+  border: 1px solid rgba(var(--v-theme-on-surface), 0.12);
+  border-radius: 8px;
+  box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
 }
 
 .ms-col-check {
@@ -1841,6 +1881,16 @@ onBeforeUnmount(() => {
 
   .ms-select {
     flex-basis: 100%;
+  }
+
+  .ms-table-wrap {
+    max-height: 52vh;
+    min-height: 180px;
+  }
+
+  .ms-category-item {
+    font-size: 0.8rem;
+    padding: 4px 10px;
   }
 }
 </style>

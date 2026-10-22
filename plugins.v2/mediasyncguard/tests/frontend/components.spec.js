@@ -259,6 +259,30 @@ describe('MediaSyncGuard Page.vue', () => {
     expect(document.body.textContent).toContain('已删除 1 个媒体条目')
   })
 
+  it('filters by category without changing selection', async () => {
+    const { api } = createPageApi()
+    mountComponent(Page, { api, pluginId: 'MediaSyncGuard' })
+    await flushPromises()
+
+    const categoryButtons = Array.from(document.querySelectorAll('.ms-category-item'))
+    expect(categoryButtons.length).toBeGreaterThan(1)
+    const activeCategory = categoryButtons.find(node => (node.textContent || '').includes('老友记'))
+    expect(activeCategory, '媒体分类列表中应包含分组分类').toBeTruthy()
+
+    // 点击分类只做筛选，不勾选任何条目
+    activeCategory.click()
+    await flushPromises()
+    expect(activeCategory.classList.contains('ms-category-item--active')).toBe(true)
+    expect(findButton('删除选中媒体（0）'), '分类筛选不应改变已选择数').toBeTruthy()
+
+    // 再点“全部”恢复
+    const allCategory = categoryButtons.find(node => (node.textContent || '').trim().startsWith('全部'))
+    expect(allCategory).toBeTruthy()
+    allCategory.click()
+    await flushPromises()
+    expect(allCategory.classList.contains('ms-category-item--active')).toBe(true)
+  })
+
   it('cancels a single pending action through the pending/cancel API', async () => {
     const { api } = createPageApi()
     const view = mountComponent(Page, { api, pluginId: 'MediaSyncGuard' })
