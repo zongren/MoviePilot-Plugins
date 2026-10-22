@@ -2090,6 +2090,30 @@ class SyncRuntime:
             if isinstance(row, dict) and row.get("id")
         }
         request_delete_files = bool(payload.get("delete_files", False))
+        # 本次批量删除的种子集合：同批一起删除的互为主辅种种子不视为“共享阻塞”
+        batch_keys: set = set()
+        for item_id in ids:
+            row = rows.get(item_id)
+            if not row:
+                continue
+            if _text(row.get("ignored_reason")):
+                continue
+            batch_downloader = _text(row.get("downloader"))
+            batch_hash = _text(row.get("hash")).lower()
+            if not batch_downloader or not batch_hash:
+                continue
+            batch_key = torrent_key(batch_downloader, batch_hash)
+            live_batch = self._snapshot.torrents.get(batch_key)
+            if live_batch is None:
+                continue
+            try:
+                if guard_module.is_ignored(live_batch, self._config):
+                    continue
+            except Exception:  # noqa: BLE001 - 无法判断时保守地不纳入批量
+                continue
+            if links.media_of(batch_key):
+                continue
+            batch_keys.add(batch_key)
         deleted = 0
         failed: List[Dict[str, str]] = []
         warnings: List[str] = []
@@ -2133,7 +2157,11 @@ class SyncRuntime:
             delete_files = request_delete_files
             if delete_files:
                 try:
-                    safe = bool(guard_module.safe_delete_files_map([key], links).get(key, False))
+                    safe = bool(
+                        guard_module.safe_delete_files_map(
+                            [key], links, deleting_keys=batch_keys
+                        ).get(key, False)
+                    )
                 except Exception as err:  # noqa: BLE001
                     logger.warning(f"媒体同步守护校验删文件安全性失败：{err}")
                     safe = False

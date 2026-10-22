@@ -86,7 +86,7 @@ def _default_build_scan(*args, **kwargs):
     return dict(SCAN_HOOK_RESULT)
 
 
-def _default_safe_map(keys, links):
+def _default_safe_map(keys, links, deleting_keys=None):
     return {str(key): True for key in (keys or [])}
 
 

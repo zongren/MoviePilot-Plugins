@@ -468,6 +468,23 @@ class ScanIgnoreKeywordTest(unittest.TestCase):
         self.assertEqual(result["skipped"]["ignored_keyword"], 0)
 
 
+class BatchDeleteSharedFileTest(unittest.TestCase):
+    """同一批删除的互为主辅种种子共享文件时，应允许一起删文件（而非逐项误判共享）。"""
+
+    def test_batch_keys_are_not_treated_as_external_sharers(self):
+        first = TorrentItem(downloader="主QB", hash="a", name="dup-a")
+        second = TorrentItem(downloader="主QB", hash="b", name="dup-b")
+        links = REAL_LINKER.LinkIndex()
+        links.add_torrent_inode((58, 4242), first)
+        links.add_torrent_inode((58, 4242), second)
+        single = REAL_GUARD.safe_delete_files_map([first.key], links)
+        self.assertFalse(single[first.key])
+        batch = REAL_GUARD.safe_delete_files_map(
+            [first.key], links, deleting_keys={first.key, second.key}
+        )
+        self.assertTrue(batch[first.key])
+
+
 class QbIncompleteSuffixLinkTest(unittest.TestCase):
     """qBittorrent 未完成文件后缀 `.!qB` 不应导致媒体/种子关联失效。"""
 

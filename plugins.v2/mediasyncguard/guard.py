@@ -580,7 +580,11 @@ def _media_payload(media: MediaItem) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # 删除文件安全性
 # ---------------------------------------------------------------------------
-def safe_delete_files_map(torrent_keys: Iterable[str], links: LinkIndex) -> Dict[str, bool]:
+def safe_delete_files_map(
+    torrent_keys: Iterable[str],
+    links: LinkIndex,
+    deleting_keys: Optional[Iterable[str]] = None,
+) -> Dict[str, bool]:
     """对每个待删种子判断能否安全删除其下载文件（契约 §3.3）。
 
     仅当同时满足以下条件才返回 ``True``：
@@ -589,11 +593,16 @@ def safe_delete_files_map(torrent_keys: Iterable[str], links: LinkIndex) -> Dict
     - 每个 inode 在 ``links.inode_torrents`` 中的所有引用都在本次待删集合内
       （即没有其它现存种子共享这些文件）；
     - 每个 inode 在 ``links.inode_media`` 中没有当前媒体库引用。
+
+    ``deleting_keys`` 用于批量删除场景：同一次手动操作里一起删除的其它种子
+    视为“也会消失”，不再算作共享阻塞者（否则互为主辅种的成组种子永远无法删文件）。
     """
     if links is None:
         links = LinkIndex()
     keys = [str(key) for key in (torrent_keys or []) if str(key)]
     key_set = set(keys)
+    if deleting_keys:
+        key_set.update(str(key) for key in deleting_keys if str(key))
     result: Dict[str, bool] = {}
     for key in keys:
         result[key] = _torrent_files_safe(key, links, key_set)
