@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
@@ -256,3 +257,234 @@ def scan_temp_files(
         "file_lists_fetched": fetched,
     }
     return result
+
+# ======================================================================
+# 无对应下载任务的残留文件/目录扫描
+# ======================================================================
+
+# 单次扫描最多输出的残留条目数
+MAX_ORPHAN_ROWS = 500
+# 统计单个残留目录大小时最多遍历的文件数
+MAX_ORPHAN_FILES_PER_UNIT = 200_000
+
+
+@dataclass
+class OrphanRow:
+    """下载目录中不属于任何现存任务的残留文件/目录。"""
+
+    id: str
+    path: str
+    name: str
+    kind: str  # dir / file / symlink
+    size: int
+    files: int
+    mtime: float
+
+    @property
+    def reason(self) -> str:
+        return "orphan_download"
+
+    @property
+    def deletable(self) -> bool:
+        return True
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "path": self.path,
+            "name": self.name,
+            "kind": self.kind,
+            "size": int(self.size),
+            "files": int(self.files),
+            "mtime": float(self.mtime),
+            "reason": self.reason,
+            "deletable": self.deletable,
+        }
+
+
+@dataclass
+class OrphanScanResult:
+    rows: List[OrphanRow] = field(default_factory=list)
+    stats: Dict[str, int] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "rows": [row.to_dict() for row in self.rows],
+            "stats": dict(self.stats),
+            "errors": list(self.errors),
+        }
+
+
+def _measure_path(path: str) -> tuple:
+    """返回 (size, file_count)；目录只做只读遍历，不跟随目录符号链接。"""
+    try:
+        lstat_result = os.lstat(path)
+    except OSError:
+        return 0, 0
+    if not os.path.isdir(path) or os.path.islink(path):
+        return int(getattr(lstat_result, "st_size", 0) or 0), 1
+    total = 0
+    files = 0
+    for root, _dirnames, filenames in os.walk(path, followlinks=False):
+        for name in filenames:
+            files += 1
+            if files > MAX_ORPHAN_FILES_PER_UNIT:
+                return total, files
+            full = os.path.join(root, name)
+            try:
+                total += int(os.lstat(full).st_size)
+            except OSError:
+                continue
+    return total, files
+
+
+def _claimed_and_ancestors(torrents: Iterable[TorrentItem]) -> tuple:
+    """返回 (claimed 路径集合, claimed 路径的所有祖先目录集合)。"""
+    claimed: set = set()
+    for torrent in torrents or []:
+        content_path = _norm(getattr(torrent, "content_path", ""))
+        if content_path:
+            claimed.add(content_path)
+    ancestors: set = set()
+    for content_path in claimed:
+        parent = os.path.dirname(content_path)
+        while parent and parent not in ancestors:
+            ancestors.add(parent)
+            next_parent = os.path.dirname(parent)
+            if next_parent == parent:
+                break
+            parent = next_parent
+    ancestors -= claimed
+    return claimed, ancestors
+
+
+_QB_PARTS_NAME_RE = re.compile(r"^\.[0-9a-f]{40}\.parts$", re.IGNORECASE)
+
+
+def _is_internal_download_file(name: str) -> bool:
+    """判断是否是下载器的内部文件/临时文件（不应在无任务残留里重复报告）。
+
+    - 未完成文件后缀（.!qB/.!ut/.part 等）由“下载器临时文件”页负责；
+    - qBittorrent 的 ``.<hash>.parts`` 等内部 metadata 文件可能仍被活动任务使用，跳过。
+    """
+    if not name:
+        return True
+    if _temp_suffix(name):
+        return True
+    lower = str(name).casefold()
+    if _QB_PARTS_NAME_RE.match(lower):
+        return True
+    if lower.startswith(".") and lower.endswith(".parts"):
+        return True
+    return False
+
+
+def _iter_orphan_units(roots: Iterable[str], claimed: set, ancestors: set) -> Iterable[Dict[str, Any]]:
+    """遍历下载根目录，产出不属于任何任务的顶层残留单元。"""
+    for root in roots or []:
+        base = _norm(root)
+        if not base or not os.path.isdir(base) or os.path.islink(base):
+            continue
+        # 根目录本身也可能是某个任务的内容路径（极少见），此时整体跳过
+        if base in claimed:
+            continue
+        stack: List[str] = [base]
+        while stack:
+            directory = stack.pop()
+            try:
+                entries = list(os.scandir(directory))
+            except OSError:
+                continue
+            for entry in entries:
+                path = _norm(entry.path)
+                if path in claimed:
+                    continue
+                is_dir = False
+                try:
+                    is_dir = entry.is_dir(follow_symlinks=False)
+                except OSError:
+                    is_dir = False
+                if is_dir and path in ancestors:
+                    # 分类目录（下面还有现存任务的内容），继续向下找
+                    stack.append(path)
+                    continue
+                if not is_dir and _is_internal_download_file(entry.name):
+                    continue
+                # 既不是任务内容、也不是任务内容的祖先目录 → 整个单元视为残留
+                kind = "dir" if is_dir else ("symlink" if entry.is_symlink() else "file")
+                try:
+                    lstat_result = entry.stat(follow_symlinks=False)
+                    mtime = float(getattr(lstat_result, "st_mtime", 0.0) or 0.0)
+                except OSError:
+                    mtime = 0.0
+                yield {"path": path, "name": entry.name, "kind": kind, "mtime": mtime}
+
+
+def path_still_claimed(path: str, torrents: Iterable[TorrentItem]) -> bool:
+    """判断路径是否仍被现存任务引用（等于/位于任务内容路径内，或包含任务内容路径）。"""
+    normalized = _norm(path)
+    if not normalized:
+        return True
+    for torrent in torrents or []:
+        content_path = _norm(getattr(torrent, "content_path", ""))
+        if not content_path:
+            continue
+        if (
+            normalized == content_path
+            or _under(normalized, content_path)
+            or _under(content_path, normalized)
+        ):
+            return True
+    return False
+
+
+def scan_orphan_downloads(
+    config: PluginConfig,
+    torrents: Iterable[TorrentItem],
+    download_roots: Optional[Iterable[str]] = None,
+) -> OrphanScanResult:
+    """扫描下载目录中没有对应现存任务的残留文件/目录。
+
+    判断依据是当前任务的 ``content_path``：
+
+    - 路径等于或位于某个任务内容路径内 → 属于任务，不报告；
+    - 路径是某个任务内容路径的祖先（分类目录）→ 继续向下检查；
+    - 其它路径 → 残留单元（整个目录作为一条，便于一键清理）。
+    """
+    result = OrphanScanResult()
+    roots = list(download_roots) if download_roots is not None else list(
+        getattr(config, "download_delete_roots", None) or []
+    )
+    torrent_list = [item for item in (torrents or []) if isinstance(item, TorrentItem)]
+    claimed, ancestors = _claimed_and_ancestors(torrent_list)
+    total_size = 0
+    total_files = 0
+    scanned_roots = 0
+    for unit in _iter_orphan_units(roots, claimed, ancestors):
+        if len(result.rows) >= MAX_ORPHAN_ROWS:
+            result.errors.append(f"残留条目过多，仅展示前 {MAX_ORPHAN_ROWS} 条")
+            break
+        if scanned_roots == 0:
+            scanned_roots = len(roots)
+        size, files = _measure_path(unit["path"])
+        row = OrphanRow(
+            id="orphan:" + hashlib.sha1(unit["path"].encode("utf-8", "ignore")).hexdigest()[:16],
+            path=unit["path"],
+            name=unit["name"],
+            kind=unit["kind"],
+            size=size,
+            files=files,
+            mtime=unit["mtime"],
+        )
+        result.rows.append(row)
+        total_size += size
+        total_files += files
+    result.stats = {
+        "orphan_units": len(result.rows),
+        "orphan_files": total_files,
+        "orphan_size": total_size,
+        "download_roots": scanned_roots,
+    }
+    return result
+

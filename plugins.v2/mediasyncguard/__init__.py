@@ -29,7 +29,7 @@ class MediaSyncGuard(_PluginBase):
     # 插件图标
     plugin_icon = "mediasyncguard.png"
     # 插件版本
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -547,6 +547,21 @@ class MediaSyncGuard(_PluginBase):
                                             "model": "scan_temp_files",
                                             "label": "扫描下载器临时/残留文件",
                                             "hint": "检查 .!qB/.!ut/.part 等文件，并标注是否仍属于现存任务",
+                                            "persistent-hint": True,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "scan_orphan_downloads",
+                                            "label": "扫描无任务残留文件",
+                                            "hint": "列出下载目录中不属于任何现存任务的文件/目录，可勾选清理",
                                             "persistent-hint": True,
                                         },
                                     }

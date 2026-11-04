@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -86,7 +87,7 @@ MAX_ERROR_TEXT = 500
 # 下载器“路径不可见/内容缺失”任务占比超过该值时，视为无法校验文件共享
 MAX_UNVERIFIABLE_DOWNLOADER_RATIO = 0.05
 # 手动删除：单次最多处理条目数（防止一次误选清空整个扫描结果）
-MAX_MANUAL_APPLY_ITEMS = 100
+MAX_MANUAL_APPLY_ITEMS = 1000
 # 手动删除：扫描结果最大有效期（秒），过期必须重新扫描
 MAX_SCAN_AGE_SECONDS = 600
 # 手动删除前若上一轮轮询早于该时间，先同步刷新一次实时状态
@@ -1606,6 +1607,17 @@ class SyncRuntime:
         )
         return scanned.to_dict()
 
+    def _scan_orphan_downloads(self, snapshot: Snapshot) -> Dict[str, Any]:
+        """扫描下载目录中不属于任何现存任务的残留文件/目录。"""
+        try:
+            from . import residue as residue_module
+        except ImportError:
+            import residue as residue_module  # type: ignore
+        scanned = residue_module.scan_orphan_downloads(
+            self._config, list(snapshot.torrents.values())
+        )
+        return scanned.to_dict()
+
     def _finalize_scan(
         self,
         *,
@@ -1724,6 +1736,24 @@ class SyncRuntime:
                 result["temp_files"] = []
                 result["temp_file_stats"] = {}
                 result["temp_file_errors"] = []
+            if getattr(self._config, "scan_orphan_downloads", True):
+                self._set_scan_progress("正在检查无任务残留文件…")
+                try:
+                    orphan_data = self._scan_orphan_downloads(snapshot)
+                except Exception as err:  # noqa: BLE001 - 残留扫描失败不应让整个扫描失败
+                    logger.warning(f"媒体同步守护扫描无任务残留文件失败：{err}")
+                    orphan_data = {
+                        "rows": [],
+                        "stats": {},
+                        "errors": [f"检查无任务残留文件失败：{err}"],
+                    }
+                result["orphan_downloads"] = orphan_data.get("rows") or []
+                result["orphan_download_stats"] = orphan_data.get("stats") or {}
+                result["orphan_download_errors"] = orphan_data.get("errors") or []
+            else:
+                result["orphan_downloads"] = []
+                result["orphan_download_stats"] = {}
+                result["orphan_download_errors"] = []
             self._scan_links = build.index
             self._scan_snapshot = snapshot
             self._last_scan_summary = {
@@ -1772,12 +1802,14 @@ class SyncRuntime:
             kind = "media"
         elif kind in {"temp_files", "tempfiles", "downloads", "residue"}:
             kind = "temp_files"
-        if kind not in {"media", "torrents", "temp_files"}:
+        elif kind in {"orphan_downloads", "orphan", "leftover_files", "download_orphans"}:
+            kind = "orphan_downloads"
+        if kind not in {"media", "torrents", "temp_files", "orphan_downloads"}:
             return {
                 "success": False,
                 "deleted": 0,
                 "failed": [],
-                "warnings": ["未知的操作类型，仅支持 media / torrents / temp_files"],
+                "warnings": ["未知的操作类型，仅支持 media / torrents / temp_files / orphan_downloads"],
                 "message": "未知的操作类型",
             }
         ids = [str(item).strip() for item in (payload.get("ids") or []) if str(item).strip()]
@@ -1855,7 +1887,103 @@ class SyncRuntime:
             return self._apply_media_ids(ids, payload, result, links, guard_module)
         if kind == "temp_files":
             return self._apply_temp_files(ids, result)
+        if kind == "orphan_downloads":
+            return self._apply_orphan_downloads(ids, result)
         return self._apply_torrent_ids(ids, payload, result, links, guard_module)
+
+    @staticmethod
+    def _contains_mountpoint(path: str) -> bool:
+        """判断目录自身或子目录是否包含挂载点（防止 rmtree 跨文件系统误删）。"""
+        try:
+            if os.path.ismount(path):
+                return True
+            if not os.path.isdir(path) or os.path.islink(path):
+                return False
+            for root, dirnames, _filenames in os.walk(path, followlinks=False):
+                for dirname in dirnames:
+                    if os.path.ismount(os.path.join(root, dirname)):
+                        return True
+        except OSError:
+            return True
+        return False
+
+    def _apply_orphan_downloads(self, ids: List[str], result: Dict[str, Any]) -> Dict[str, Any]:
+        """删除扫描页选中的无任务残留文件/目录（删除前按当前快照重新校验归属）。"""
+        rows = {
+            str(row.get("id")): row
+            for row in result.get("orphan_downloads") or []
+            if isinstance(row, dict) and row.get("id")
+        }
+        try:
+            from . import residue as residue_module
+        except ImportError:
+            import residue as residue_module  # type: ignore
+        download_roots = [
+            str(item).rstrip("/")
+            for item in (getattr(self._config, "download_delete_roots", None) or [])
+            if str(item).strip()
+        ]
+        live_torrents = list(self._snapshot.torrents.values())
+        deleted = 0
+        deleted_ids: List[str] = []
+        failed: List[Dict[str, str]] = []
+        warnings: List[str] = []
+        for item_id in ids:
+            row = rows.get(item_id)
+            if row is None:
+                failed.append({"id": item_id, "error": "扫描结果中不存在该条目"})
+                continue
+            path = _text(row.get("path"))
+            if not path:
+                failed.append({"id": item_id, "error": "条目缺少路径"})
+                continue
+            normalized = os.path.normpath(path)
+            roots = [os.path.normpath(item) for item in download_roots if item]
+            if not roots or not any(
+                normalized == root or normalized.startswith(root + os.sep) for root in roots
+            ):
+                failed.append({"id": item_id, "error": "路径不在允许删除的下载目录内"})
+                continue
+            if normalized in roots:
+                failed.append({"id": item_id, "error": "禁止删除下载目录根路径"})
+                continue
+            # 删除前用最新快照重新确认：路径仍被现存任务引用/包含现存任务内容时拒绝
+            try:
+                still_claimed = residue_module.path_still_claimed(normalized, live_torrents)
+            except Exception as err:  # noqa: BLE001
+                failed.append({"id": item_id, "error": f"无法校验路径归属：{err}"})
+                continue
+            if still_claimed:
+                failed.append({"id": item_id, "error": "该路径仍被现存下载任务引用，已跳过"})
+                warnings.append(f"{normalized} 仍被现存任务引用，已跳过")
+                continue
+            if os.path.isdir(normalized) and not os.path.islink(normalized) and self._contains_mountpoint(normalized):
+                failed.append(
+                    {"id": item_id, "error": "该目录包含挂载点，为避免跨文件系统误删已跳过"}
+                )
+                continue
+            try:
+                if os.path.islink(normalized) or not os.path.isdir(normalized):
+                    os.remove(normalized)
+                else:
+                    shutil.rmtree(normalized)
+            except FileNotFoundError:
+                pass
+            except OSError as err:
+                failed.append({"id": item_id, "error": f"删除失败：{err}"})
+                continue
+            deleted += 1
+            deleted_ids.append(item_id)
+        if deleted_ids:
+            self._remove_scan_rows("orphan_downloads", deleted_ids)
+        message = f"已删除 {deleted} 个无任务残留条目" if deleted else "未删除任何残留条目"
+        return {
+            "success": deleted > 0,
+            "deleted": deleted,
+            "failed": failed,
+            "warnings": warnings,
+            "message": message,
+        }
 
     def _apply_temp_files(self, ids: List[str], result: Dict[str, Any]) -> Dict[str, Any]:
         """删除扫描页选中的下载目录临时/残留文件（仅限已确认不属于现存任务的条目）。"""
@@ -2221,7 +2349,7 @@ class SyncRuntime:
                 return
             rows = [row for row in result.get(key) or [] if str(row.get("id")) not in set(removed_ids)]
             result[key] = rows
-            if key == "temp_files":
+            if key in {"temp_files", "orphan_downloads"}:
                 return
             # 同步过滤分组中已空的 item_ids
             group_key = "media_groups" if key == "media_without_torrent" else "torrent_groups"

@@ -283,6 +283,51 @@ describe('MediaSyncGuard Page.vue', () => {
     expect(allCategory.classList.contains('ms-category-item--active')).toBe(true)
   })
 
+  it('renders orphan-download rows and lets the user select them', async () => {
+    const scan = JSON.parse(JSON.stringify(scanFixture))
+    scan.result.orphan_downloads = [
+      {
+        id: 'orphan:old-show',
+        path: '/medias/Downloads/TV/Old Deleted Show',
+        name: 'Old Deleted Show',
+        kind: 'dir',
+        size: 12345,
+        files: 3,
+        deletable: true,
+        reason: 'orphan_download',
+      },
+    ]
+    scan.result.orphan_download_stats = {
+      orphan_units: 1,
+      orphan_files: 3,
+      orphan_size: 12345,
+      download_roots: 1,
+    }
+    const { api } = createPageApi({ scan })
+    mountComponent(Page, { api, pluginId: 'MediaSyncGuard' })
+    await flushPromises()
+
+    clickTab('无任务文件')
+    await flushPromises()
+
+    const text = document.body.textContent || ''
+    expect(text).toContain('Old Deleted Show')
+    expect(text).toContain('删除选中残留（0）')
+
+    const row = Array.from(document.querySelectorAll('.ms-table tbody tr'))
+      .find(node => (node.textContent || '').includes('Old Deleted Show'))
+    expect(row).toBeTruthy()
+    const checkbox = row.querySelector('.v-checkbox input')
+    checkbox.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('删除选中残留（1）')
+
+    const deleteButton = findButton('删除选中残留（1）')
+    deleteButton.click()
+    await flushPromises()
+    expect(document.body.textContent).toContain('删除无任务残留')
+  })
+
   it('renders downloader temp-file rows and only allows deleting orphans', async () => {
     const scan = JSON.parse(JSON.stringify(scanFixture))
     scan.result.temp_files = [

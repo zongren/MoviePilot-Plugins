@@ -342,6 +342,70 @@ class ManualApplySafetyTest(T.ScanAndApplyTest):
         self.assertEqual(self.jellyfin.deleted, [])
 
 
+class OrphanDownloadApplyTest(T.ScanAndApplyTest):
+    """无任务残留文件/目录的扫描结果清理与删除前归属复检。"""
+
+    def _prepare(self):
+        downloads = self.media_root / "Downloads"
+        live = downloads / "TV" / "Live Show"
+        live.mkdir(parents=True)
+        (live / "e01.mkv").write_bytes(b"live")
+        old = downloads / "TV" / "Old Deleted Show"
+        old.mkdir()
+        (old / "e01.mkv").write_bytes(b"old")
+        live_row = {
+            "id": "主QB|live",
+            "downloader": "主QB",
+            "hash": "live",
+            "name": "Live Show",
+            "content_path": str(live),
+            "save_path": str(downloads / "TV"),
+            "path_exists": True,
+        }
+        self._run_scan(self._result(torrent_rows=[live_row]))
+        self.runtime._scan_state["result"]["orphan_downloads"] = [
+            {
+                "id": "orphan:old",
+                "path": str(old),
+                "name": old.name,
+                "kind": "dir",
+                "size": 3,
+                "files": 1,
+                "deletable": True,
+                "reason": "orphan_download",
+            },
+            {
+                "id": "orphan:live",
+                "path": str(live),
+                "name": live.name,
+                "kind": "dir",
+                "size": 4,
+                "files": 1,
+                "deletable": True,
+                "reason": "orphan_download",
+            },
+        ]
+        self._seed_live_state(torrent_rows=[live_row])
+        return old, live
+
+    def test_apply_deletes_only_unclaimed_orphan_dir(self):
+        old, live = self._prepare()
+        response = self.runtime.apply_scan_selection(
+            {"kind": "orphan_downloads", "ids": ["orphan:old", "orphan:live"]}
+        )
+        self.assertEqual(response["deleted"], 1, response)
+        self.assertFalse(old.exists())
+        self.assertTrue(live.exists())
+        self.assertTrue(
+            any("仍被现存下载任务引用" in item["error"] for item in response["failed"])
+        )
+
+    def test_delete_limit_allows_more_than_100(self):
+        import runtime as runtime_module
+
+        self.assertGreaterEqual(runtime_module.MAX_MANUAL_APPLY_ITEMS, 500)
+
+
 class TempFileApplyTest(T.ScanAndApplyTest):
     """扫描页的下载目录临时文件清理：只允许删除已确认无主的文件。"""
 

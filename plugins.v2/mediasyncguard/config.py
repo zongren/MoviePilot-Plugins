@@ -141,6 +141,8 @@ class PluginConfig:
     scan_ignore_keywords: List[str] = field(default_factory=list)
     # 一次性扫描是否检查下载目录中的临时/残留文件（.!qB/.!ut/.part 等）
     scan_temp_files: bool = True
+    # 一次性扫描是否检查“没有任何现存任务对应”的下载残留文件/目录
+    scan_orphan_downloads: bool = True
     keep_history_actions: int = 50
 
     @property
@@ -188,6 +190,7 @@ class PluginConfig:
             scan_include_unfinished=_as_bool(data.get("scan_include_unfinished"), False),
             scan_ignore_keywords=_as_str_list(data.get("scan_ignore_keywords")),
             scan_temp_files=_as_bool(data.get("scan_temp_files"), True),
+            scan_orphan_downloads=_as_bool(data.get("scan_orphan_downloads"), True),
             keep_history_actions=_as_int(data.get("keep_history_actions"), 50, minimum=0, maximum=1000),
         )
         return config

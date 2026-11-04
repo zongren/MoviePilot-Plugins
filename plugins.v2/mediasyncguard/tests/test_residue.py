@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import sys
 import tempfile
@@ -74,6 +75,82 @@ class TempFileScanTest(unittest.TestCase):
         self.assertFalse(rows["unknown.mkv.!qB"].deletable)
         self.assertEqual(result.stats["temp_files"], 3)
         self.assertEqual(result.stats["orphan_temp_files"], 1)
+
+    def test_orphan_scan_reports_only_unclaimed_units(self):
+        import models
+
+        tv = self.downloads / "TV"
+        tv.mkdir()
+        live = tv / "Live Show"
+        live.mkdir()
+        (live / "e01.mkv").write_bytes(b"live")
+        old = tv / "Old Deleted Show"
+        old.mkdir()
+        (old / "e01.mkv").write_bytes(b"old")
+        (old / "e02.mkv").write_bytes(b"old2")
+        loose = tv / "loose.mkv"
+        loose.write_bytes(b"loose")
+        movies = self.downloads / "Movies"
+        movies.mkdir()
+        movie = movies / "movie.mkv"
+        movie.write_bytes(b"movie")
+
+        torrents = [
+            models.TorrentItem(
+                downloader="主QB", hash="a", content_path=str(live), save_path=str(tv)
+            ),
+            models.TorrentItem(
+                downloader="主QB", hash="b", content_path=str(movie), save_path=str(movies)
+            ),
+        ]
+        scanned = residue.scan_orphan_downloads(self._config(), torrents)
+        paths = {row.path for row in scanned.rows}
+        self.assertNotIn(str(live), paths)
+        self.assertNotIn(str(movie), paths)
+        self.assertIn(str(old), paths)
+        self.assertIn(str(loose), paths)
+        self.assertEqual(scanned.stats["orphan_units"], 2)
+        self.assertTrue(
+            all(row.reason == "orphan_download" and row.deletable for row in scanned.rows)
+        )
+        old_row = next(row for row in scanned.rows if row.path == str(old))
+        self.assertEqual(old_row.kind, "dir")
+        self.assertEqual(old_row.files, 2)
+
+    def test_orphan_scan_ignores_temp_and_qb_internal_files(self):
+        import models
+
+        tv = self.downloads / "TV"
+        tv.mkdir()
+        live = tv / "Live Show"
+        live.mkdir()
+        (live / "e01.mkv").write_bytes(b"live")
+        (tv / "unowned.mkv.!qB").write_bytes(b"temp")
+        (tv / ".0123456789abcdef0123456789abcdef01234567.parts").write_bytes(b"meta")
+        (tv / "real-orphan.mkv").write_bytes(b"orphan")
+        torrent = models.TorrentItem(
+            downloader="主QB", hash="a", content_path=str(live), save_path=str(tv)
+        )
+        scanned = residue.scan_orphan_downloads(self._config(), [torrent])
+        paths = {os.path.basename(row.path) for row in scanned.rows}
+        self.assertIn("real-orphan.mkv", paths)
+        self.assertNotIn("unowned.mkv.!qB", paths)
+        self.assertNotIn(".0123456789abcdef0123456789abcdef01234567.parts", paths)
+
+    def test_path_still_claimed_checks_both_directions(self):
+        import models
+
+        live = self.downloads / "TV" / "live"
+        live.mkdir(parents=True)
+        torrents = [
+            models.TorrentItem(
+                downloader="主QB", hash="a", content_path=str(live), save_path=str(live.parent)
+            )
+        ]
+        self.assertTrue(residue.path_still_claimed(str(live / "e01.mkv"), torrents))
+        self.assertTrue(residue.path_still_claimed(str(live), torrents))
+        self.assertTrue(residue.path_still_claimed(str(self.downloads / "TV"), torrents))
+        self.assertFalse(residue.path_still_claimed(str(self.downloads / "TV" / "old"), torrents))
 
     def test_non_temp_files_are_ignored(self):
         (self.downloads / "movie.mkv").write_bytes(b"video")

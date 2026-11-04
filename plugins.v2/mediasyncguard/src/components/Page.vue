@@ -206,6 +206,9 @@ const torrentGroups = computed(() => asArray(scanResult.value?.torrent_groups))
 const tempFiles = computed(() => asArray(scanResult.value?.temp_files))
 const tempFileStats = computed(() => asObject(scanResult.value?.temp_file_stats))
 const tempFileErrors = computed(() => asArray(scanResult.value?.temp_file_errors))
+const orphanDownloads = computed(() => asArray(scanResult.value?.orphan_downloads))
+const orphanDownloadStats = computed(() => asObject(scanResult.value?.orphan_download_stats))
+const orphanDownloadErrors = computed(() => asArray(scanResult.value?.orphan_download_errors))
 
 // ---------------------------------------------------------------- 待执行动作
 const pendingList = computed(() => asArray(pendingData.value.pending))
@@ -226,10 +229,12 @@ const mediaCategoryFilter = ref('all')
 const torrentSearchText = ref('')
 const torrentCategoryFilter = ref('all')
 const tempFileSearchText = ref('')
+const orphanSearchText = ref('')
 
 const selectedMedia = ref(new Set())
 const selectedTorrents = ref(new Set())
 const selectedTempFiles = ref(new Set())
+const selectedOrphans = ref(new Set())
 
 const normalize = value => String(value ?? '').toLowerCase()
 
@@ -363,6 +368,14 @@ const filteredTempFiles = computed(() => {
   })
 })
 
+const filteredOrphanDownloads = computed(() => {
+  const text = normalize(orphanSearchText.value.trim())
+  return orphanDownloads.value.filter(item => {
+    if (!text) return true
+    return [item?.path, item?.name, item?.kind].some(value => normalize(value).includes(text))
+  })
+})
+
 const TEMP_REASON_LABELS = {
   owned_by_torrent: '属于现存任务',
   orphan_temp_file: '无主残留',
@@ -420,6 +433,22 @@ const selectedTempFileCount = computed(() => selectedTempFiles.value.size)
 const selectedTempFileSize = computed(() => selectedTempFileItems.value
   .reduce((total, item) => total + asNumber(item?.size), 0))
 
+const selectableOrphanIds = computed(() => filteredOrphanDownloads.value
+  .map(item => item?.id)
+  .filter(Boolean))
+const allOrphansSelected = computed(() => (
+  selectableOrphanIds.value.length > 0
+  && selectableOrphanIds.value.every(id => selectedOrphans.value.has(id))
+))
+const someOrphansSelected = computed(() => (
+  !allOrphansSelected.value && selectableOrphanIds.value.some(id => selectedOrphans.value.has(id))
+))
+const selectedOrphanItems = computed(() => orphanDownloads.value
+  .filter(item => selectedOrphans.value.has(item?.id)))
+const selectedOrphanCount = computed(() => selectedOrphans.value.size)
+const selectedOrphanSize = computed(() => selectedOrphanItems.value
+  .reduce((total, item) => total + asNumber(item?.size), 0))
+
 // 扫描结果刷新后清理已不存在的选择，避免提交过期 id
 function pruneSelection(items, selected) {
   const available = new Set(asArray(items).map(item => item?.id).filter(Boolean))
@@ -430,6 +459,7 @@ function pruneSelection(items, selected) {
 watch(mediaItems, items => pruneSelection(items, selectedMedia))
 watch(torrentItems, items => pruneSelection(items, selectedTorrents))
 watch(tempFiles, items => pruneSelection(items, selectedTempFiles))
+watch(orphanDownloads, items => pruneSelection(items, selectedOrphans))
 
 function toggleMediaSelection(id, value) {
   if (!id) return
@@ -475,6 +505,23 @@ function toggleTempFileSelection(id, value) {
   selectedTempFiles.value = next
 }
 
+function toggleOrphanSelection(id, value) {
+  if (!id) return
+  const next = new Set(selectedOrphans.value)
+  if (value) next.add(id)
+  else next.delete(id)
+  selectedOrphans.value = next
+}
+
+function selectAllOrphans(value) {
+  const next = new Set(selectedOrphans.value)
+  for (const id of selectableOrphanIds.value) {
+    if (value) next.add(id)
+    else next.delete(id)
+  }
+  selectedOrphans.value = next
+}
+
 function selectAllTempFiles(value) {
   const next = new Set(selectedTempFiles.value)
   for (const id of selectableTempFileIds.value) {
@@ -487,6 +534,7 @@ function selectAllTempFiles(value) {
 function clearSelection(kind) {
   if (kind === 'media') selectedMedia.value = new Set()
   else if (kind === 'temp_files') selectedTempFiles.value = new Set()
+  else if (kind === 'orphan_downloads') selectedOrphans.value = new Set()
   else selectedTorrents.value = new Set()
 }
 
@@ -704,12 +752,17 @@ const applyResult = ref(null)
 function openApplyDialog(kind) {
   const items = kind === 'media'
     ? selectedMediaItems.value
-    : (kind === 'temp_files' ? selectedTempFileItems.value : selectedTorrentItems.value)
+    : (kind === 'temp_files'
+      ? selectedTempFileItems.value
+      : (kind === 'orphan_downloads' ? selectedOrphanItems.value : selectedTorrentItems.value))
   if (!items.length) return
   const warnings = []
   if (kind === 'temp_files') {
     const blocked = items.filter(item => item?.deletable !== true)
     if (blocked.length) warnings.push(`${blocked.length} 个文件仍属于现存任务或归属校验失败，后端会拒绝删除`)
+  }
+  if (kind === 'orphan_downloads') {
+    warnings.push('将直接删除所选文件/目录，删除前后端会按最新任务列表再次确认它们仍未被任何任务引用')
   }
   const defaults = {
     deleteSidecars: props.initialConfig?.delete_media_sidecars !== false,
@@ -760,6 +813,7 @@ async function submitApply() {
   try {
     const isMedia = confirmState.kind === 'media'
     const isTemp = confirmState.kind === 'temp_files'
+    const isOrphan = confirmState.kind === 'orphan_downloads'
     const body = isMedia
       ? {
         kind: 'media',
@@ -769,11 +823,13 @@ async function submitApply() {
       }
       : (isTemp
         ? { kind: 'temp_files', ids: confirmState.ids }
-        : {
-          kind: 'torrents',
-          ids: confirmState.ids,
-          delete_files: Boolean(confirmState.deleteFiles),
-        })
+        : (isOrphan
+          ? { kind: 'orphan_downloads', ids: confirmState.ids }
+            : {
+            kind: 'torrents',
+            ids: confirmState.ids,
+            delete_files: Boolean(confirmState.deleteFiles),
+          }))
     const response = asObject(unwrapResponse(await props.api.post(`${basePath.value}/apply`, body)))
     applyResult.value = {
       success: response.success !== false,
@@ -785,6 +841,7 @@ async function submitApply() {
     if (applyResult.value.success) {
       if (isMedia) selectedMedia.value = new Set()
       else if (isTemp) selectedTempFiles.value = new Set()
+      else if (isOrphan) selectedOrphans.value = new Set()
       else selectedTorrents.value = new Set()
       showNotice(applyResult.value.message || `已删除 ${applyResult.value.deleted} 项`)
       await refreshCycle(true)
@@ -1213,6 +1270,10 @@ onBeforeUnmount(() => {
           <VTab value="temp_files">
             下载器临时文件
             <VChip class="ms-tab-chip" size="x-small" variant="tonal">{{ formatCount(tempFiles.length) }}</VChip>
+          </VTab>
+          <VTab value="orphan_downloads">
+            无任务文件
+            <VChip class="ms-tab-chip" size="x-small" variant="tonal">{{ formatCount(orphanDownloads.length) }}</VChip>
           </VTab>
         </VTabs>
         <VDivider />
@@ -1735,6 +1796,132 @@ onBeforeUnmount(() => {
               </div>
             </div>
           </VWindowItem>
+
+          <!-- 无对应任务的下载残留文件/目录 -->
+          <VWindowItem value="orphan_downloads">
+            <div class="ms-tab-body">
+              <div class="ms-filterbar">
+                <VTextField
+                  v-model="orphanSearchText"
+                  density="compact"
+                  variant="outlined"
+                  label="搜索残留路径"
+                  prepend-inner-icon="mdi-magnify"
+                  hide-details
+                  clearable
+                  class="ms-search"
+                />
+                <VSpacer />
+                <VBtn
+                  color="primary"
+                  variant="tonal"
+                  prepend-icon="mdi-radar"
+                  :loading="scanning"
+                  :disabled="scanRunning"
+                  @click="startScan"
+                >
+                  扫描
+                </VBtn>
+              </div>
+
+              <div v-if="orphanDownloadErrors.length" class="text-caption text-error mb-1">
+                {{ orphanDownloadErrors.join('；') }}
+              </div>
+
+              <div class="ms-selection-bar">
+                <VCheckbox
+                  :model-value="allOrphansSelected"
+                  :indeterminate="someOrphansSelected"
+                  density="compact"
+                  hide-details
+                  label="全选当前筛选结果"
+                  @update:model-value="selectAllOrphans"
+                />
+                <span class="text-caption text-medium-emphasis">
+                  显示 {{ formatCount(filteredOrphanDownloads.length) }} / 共 {{ formatCount(orphanDownloads.length) }} 项 ·
+                  {{ formatCount(orphanDownloadStats.orphan_files) }} 个文件 ·
+                  {{ formatSize(orphanDownloadStats.orphan_size) }}
+                </span>
+                <VSpacer />
+                <VBtn v-if="selectedOrphanCount" variant="text" size="small" @click="clearSelection('orphan_downloads')">
+                  清除选择
+                </VBtn>
+              </div>
+
+              <VAlert type="info" variant="tonal" density="compact" class="mb-2">
+                这里列出下载目录中不属于任何现存任务的文件/目录（例如任务已从 qBittorrent 删除，但磁盘文件还在）。
+                删除前会按最新任务列表再次确认；仍被任务引用的路径不会被删除。
+              </VAlert>
+
+              <div v-if="!scanResult && !scanRunning" class="ms-empty text-medium-emphasis">
+                尚未扫描，请先点击“扫描”。
+              </div>
+              <div v-else-if="!orphanDownloads.length" class="ms-empty text-medium-emphasis">
+                没有发现无任务残留文件。
+              </div>
+              <div v-else-if="!filteredOrphanDownloads.length" class="ms-empty text-medium-emphasis">
+                没有匹配的残留文件。
+              </div>
+              <div v-else class="ms-table-wrap">
+                <VTable density="compact" hover class="ms-table">
+                  <thead>
+                    <tr>
+                      <th class="ms-col-check">
+                        <VCheckbox
+                          :model-value="allOrphansSelected"
+                          :indeterminate="someOrphansSelected"
+                          density="compact"
+                          hide-details
+                          aria-label="全选无任务残留文件"
+                          @update:model-value="selectAllOrphans"
+                        />
+                      </th>
+                      <th class="text-start">路径</th>
+                      <th class="text-start">类型</th>
+                      <th class="text-end">大小</th>
+                      <th class="text-end">文件数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="row in filteredOrphanDownloads" :key="row.id">
+                      <td>
+                        <VCheckbox
+                          :model-value="selectedOrphans.has(row.id)"
+                          density="compact"
+                          hide-details
+                          @update:model-value="value => toggleOrphanSelection(row.id, value)"
+                        />
+                      </td>
+                      <td class="ms-path-cell">{{ row.path }}</td>
+                      <td>{{ row.kind === 'dir' ? '目录' : (row.kind === 'symlink' ? '符号链接' : '文件') }}</td>
+                      <td class="text-end">{{ formatSize(row.size) }}</td>
+                      <td class="text-end">{{ formatCount(row.files) }}</td>
+                    </tr>
+                  </tbody>
+                </VTable>
+              </div>
+
+              <div class="ms-action-bar">
+                <span class="text-body-2">
+                  已选择 {{ selectedOrphanCount }} 项（{{ formatSize(selectedOrphanSize) }}）
+                </span>
+                <VSpacer />
+                <VBtn v-if="selectedOrphanCount" variant="text" size="small" @click="clearSelection('orphan_downloads')">
+                  清除选择
+                </VBtn>
+                <VBtn
+                  color="error"
+                  variant="flat"
+                  size="small"
+                  prepend-icon="mdi-delete"
+                  :disabled="!selectedOrphanCount"
+                  @click="openApplyDialog('orphan_downloads')"
+                >
+                  删除选中残留（{{ selectedOrphanCount }}）
+                </VBtn>
+              </div>
+            </div>
+          </VWindowItem>
         </VWindow>
       </VCard>
     </div>
@@ -1746,12 +1933,16 @@ onBeforeUnmount(() => {
           <VIcon
             :icon="confirmState.kind === 'media'
               ? 'mdi-filmstrip'
-              : (confirmState.kind === 'temp_files' ? 'mdi-file-remove' : 'mdi-download')"
+              : (confirmState.kind === 'temp_files'
+                ? 'mdi-file-remove'
+                : (confirmState.kind === 'orphan_downloads' ? 'mdi-folder-remove' : 'mdi-download'))"
             class="me-2"
           />
           {{ confirmState.kind === 'media'
             ? '删除选中媒体'
-            : (confirmState.kind === 'temp_files' ? '删除选中临时文件' : '删除选中种子') }}
+            : (confirmState.kind === 'temp_files'
+              ? '删除选中临时文件'
+              : (confirmState.kind === 'orphan_downloads' ? '删除无任务残留' : '删除选中种子')) }}
         </VCardTitle>
         <VCardText>
           <template v-if="!applyResult">
@@ -1759,7 +1950,9 @@ onBeforeUnmount(() => {
               即将删除 <strong>{{ confirmState.total }}</strong>
               {{ confirmState.kind === 'media'
                 ? '项媒体条目'
-                : (confirmState.kind === 'temp_files' ? '个临时文件' : '个种子') }}（合计 {{ formatSize(confirmState.size) }}），操作不可撤销。
+                : (confirmState.kind === 'temp_files'
+                  ? '个临时文件'
+                  : (confirmState.kind === 'orphan_downloads' ? '个残留文件/目录' : '个种子')) }}（合计 {{ formatSize(confirmState.size) }}），操作不可撤销。
             </div>
             <VAlert v-if="dryRun" type="info" variant="tonal" density="compact" class="mb-2">
               当前为演练模式：监控产生的自动动作不会执行，但本次手动确认的删除会立即执行。
@@ -1800,6 +1993,11 @@ onBeforeUnmount(() => {
             <template v-else-if="confirmState.kind === 'temp_files'">
               <div class="text-caption text-medium-emphasis">
                 只删除后端已确认无主的残留文件；仍属于现存下载任务或归属校验失败的文件会被拒绝。
+              </div>
+            </template>
+            <template v-else-if="confirmState.kind === 'orphan_downloads'">
+              <div class="text-caption text-medium-emphasis">
+                将直接删除所选文件/目录。后端会在删除前按最新任务列表再次确认路径仍未被任何任务引用。
               </div>
             </template>
             <template v-else>
