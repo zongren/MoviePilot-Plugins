@@ -197,7 +197,15 @@ class EngineTests(unittest.TestCase):
     def _doc(self, text=SAMPLE):
         return parse_srt(text)
 
-    def test_whole_file_translation_preserves_timestamps(self):
+    @staticmethod
+    def _many_cues(count):
+        blocks = [
+            f"{i}\n00:00:01,000 --> 00:00:02,000\nSentence {i}."
+            for i in range(1, count + 1)
+        ]
+        return parse_srt("\n\n".join(blocks) + "\n")
+
+    def test_translation_preserves_timestamps(self):
         provider = FakeProvider(lambda cues: full_json(cues))
         doc = self._doc()
         result = SubtitleTranslator(provider).translate_document(doc)
@@ -211,6 +219,22 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(timestamp_lines(output), timestamp_lines(SAMPLE))
         self.assertEqual(cue_signature(doc), cue_signature(parse_srt(SAMPLE)))
         self.assertIn("译Hello world\nHello world", output)
+
+    def test_translation_uses_bounded_batches(self):
+        """超长整文件请求会让模型丢条/串位，翻译必须按小批次提交。"""
+        provider = FakeProvider(lambda cues: full_json(cues))
+        doc = self._many_cues(250)
+        result = SubtitleTranslator(provider, chunk_size=100).translate_document(doc)
+
+        self.assertEqual([len(call) for call in provider.calls], [100, 100, 50])
+        self.assertEqual(result.requests, 3)
+        self.assertEqual(result.translated, 250)
+        self.assertEqual(result.unrecovered, 0)
+        self.assertEqual(result.chunked, 0)
+        self.assertEqual(
+            {cue.timestamp_line for cue in doc.cues},
+            {"00:00:01,000 --> 00:00:02,000"},
+        )
 
     def test_zh_only_output(self):
         provider = FakeProvider(lambda cues: full_json(cues))
@@ -227,7 +251,7 @@ class EngineTests(unittest.TestCase):
             if state["first"] and len(cues) > 1:
                 state["first"] = False
                 ids = ids[:-1]  # drop the last cue
-            return json.dumps([{"n": n, "t": "译"} for n in ids], ensure_ascii=False)
+            return json.dumps([{"n": n, "t": "译" + str(n)} for n in ids], ensure_ascii=False)
 
         provider = FakeProvider(responder)
         doc = self._doc()
@@ -244,19 +268,45 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(compose_srt(doc), SAMPLE)
         self.assertTrue(result.unrecovered_ids == [1, 2, 3])
 
-    def test_chunked_fallback_on_truncation(self):
+    def test_incomplete_batch_is_retried_in_smaller_batches(self):
+        """批次整体失败（截断/超时）时，缩小批次重试并补齐全部条目。"""
+
         def responder(cues):
-            if len(cues) > 1:
-                return '[{"n":%d,"t":"译"}]' % cues[0]["n"]  # simulating truncation
+            if len(cues) > 20:
+                return "[]"  # 模拟超长响应被截断/请求失败
             return full_json(cues)
 
         provider = FakeProvider(responder)
-        doc = self._doc()
-        result = SubtitleTranslator(provider, max_retries=1, chunk_size=1).translate_document(doc)
+        doc = self._many_cues(60)
+        result = SubtitleTranslator(provider, max_retries=1, chunk_size=60).translate_document(doc)
+
         self.assertEqual(result.unrecovered, 0)
+        self.assertEqual(result.translated, 60)
         self.assertEqual(result.chunked, 1)
-        self.assertEqual(result.translated, 3)
-        self.assertEqual(timestamp_lines(compose_srt(doc)), timestamp_lines(SAMPLE))
+        self.assertTrue(any(len(call) <= 20 for call in provider.calls))
+
+    def test_duplicate_padded_batch_is_retranslated(self):
+        """模型串位后常用重复译文填充末尾，这种批次应被识别并重译。"""
+
+        def responder(cues):
+            ids = [c["n"] for c in cues]
+            if len(cues) > 15:
+                # 正常译文，但末尾 3 条被替换为同样的填充文本（模拟串位）
+                out = [{"n": n, "t": "译" + str(n)} for n in ids]
+                for item in out[-3:]:
+                    item["t"] = "重复填充"
+                return json.dumps(out, ensure_ascii=False)
+            return json.dumps([{"n": n, "t": "正确" + str(n)} for n in ids], ensure_ascii=False)
+
+        provider = FakeProvider(responder)
+        doc = self._many_cues(60)
+        result = SubtitleTranslator(provider, max_retries=1, chunk_size=60).translate_document(doc)
+
+        self.assertEqual(result.translated, 60)
+        self.assertEqual(result.unrecovered, 0)
+        self.assertGreaterEqual(result.chunked, 1)
+        self.assertEqual(doc.cues[-1].translation, "正确60")
+        self.assertNotIn("重复填充", compose_srt(doc))
 
     def test_request_failure_does_not_raise(self):
         def boom(cues):
@@ -278,8 +328,8 @@ class EngineTests(unittest.TestCase):
         with self.assertRaises(Interrupt):
             SubtitleTranslator(FakeProvider(lambda c: full_json(c)), interrupt_check=check).translate_document(doc)
 
-    def test_default_chunk_size_is_300(self):
-        self.assertEqual(CHUNK_SIZE, 300)
+    def test_default_chunk_size_is_100(self):
+        self.assertEqual(CHUNK_SIZE, 100)
 
     def test_blank_cues_are_not_requested(self):
         text = "1\n00:00:01,000 --> 00:00:02,000\n\n\n2\n00:00:03,000 --> 00:00:04,000\nHi\n"

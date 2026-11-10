@@ -5,10 +5,13 @@ Design goals
 * Timestamps and cue indexes are copied verbatim from the source SRT.  The
   model only ever sees ``[{"n": 1, "t": "..."}]`` and only ever returns
   ``n`` -> translated text, so it can never invent or shift a timing.
-* One request covers the whole file (JSON array keyed by a stable sequential
-  cue id).  Missing/blank ids are repaired with follow-up requests; if the
-  file still is not complete (e.g. the response was truncated by the output
-  token limit) the remaining cues are retried in fixed-size chunks.
+* The file is translated in bounded batches (JSON arrays keyed by a stable
+  sequential cue id).  A single request covering a whole episode makes the
+  model lose sync on long outputs: it silently merges a few adjacent cues and
+  the following translations drift one cue earlier.  Small batches keep every
+  response short, and each batch is validated: missing ids are repaired with
+  follow-up requests and a batch that looks misaligned is re-translated in
+  smaller pieces.
 * Pure standard library: no MoviePilot, ``srt`` or ``openai`` import, so the
   engine can be unit-tested and driven from a standalone CLI.
 """
@@ -21,8 +24,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-#: Fallback chunk size (internal constant, deliberately not user facing).
-CHUNK_SIZE = 300
+#: Batch size for translation requests.  Kept small on purpose: responses of a
+#: few thousand tokens are what models handle reliably, and per-batch
+#: validation bounds the damage of a single bad batch.
+CHUNK_SIZE = 100
 
 #: Encoding fallback order for reading SRT files.
 ENCODINGS: Tuple[str, ...] = ("utf-8-sig", "utf-8", "gbk", "latin-1")
@@ -38,10 +43,13 @@ _TEXT_KEYS = ("t", "text", "translation", "translated", "zh", "译文", "翻译"
 SYSTEM_PROMPT = (
     "你是一名专业的字幕翻译。用户会给你一个 JSON 数组，数组中每个对象形如 "
     '{"n": 1, "t": "原文"}。请把每个对象的 t 字段翻译成自然、口语化的简体中文：\n'
-    "1. 严格保持 n 字段不变，逐条一一对应，不要合并、拆分、增删或遗漏任何条目；\n"
-    "2. 完整保留原文中的 <i></i>、<b></b>、[ ]、( )、♪、- 等标记与括号，保留人名、地名等专有名词；\n"
-    "3. 若某条内容本身无需翻译（例如纯符号、拟声词、语气词），原样返回；\n"
-    "4. 只输出 JSON 数组本身，不要输出 markdown 代码块、解释说明或任何多余文字。"
+    "1. 严格保持 n 字段不变，逐条一一对应：输出数组的长度与顺序必须和输入完全一致，"
+    "禁止合并、拆分、增删或遗漏任何条目；\n"
+    "2. 即使相邻两条字幕属于同一句话、只是被拆成了两半，也必须各自独立翻译成对应的一条，"
+    "绝对不能把两条合并到一条里；\n"
+    "3. 完整保留原文中的 <i></i>、<b></b>、[ ]、( )、♪、- 等标记与括号，保留人名、地名等专有名词；\n"
+    "4. 若某条内容本身无需翻译（例如纯符号、拟声词、语气词），原样返回；\n"
+    "5. 只输出 JSON 数组本身，不要输出 markdown 代码块、解释说明或任何多余文字。"
 )
 
 
@@ -417,7 +425,7 @@ def _iter_chunks(items: Sequence[Any], size: int) -> Iterable[List[Any]]:
 
 
 class SubtitleTranslator:
-    """Whole-file, id-keyed translation with repair and chunked fallback."""
+    """Batched, id-keyed translation with per-batch validation and repair."""
 
     def __init__(
         self,
@@ -500,22 +508,95 @@ class SubtitleTranslator:
             left = [cue for cue in left if not translations.get(cue.id)]
         return left
 
+    @staticmethod
+    def _looks_misaligned(cues: Sequence[Cue], translations: Dict[int, str]) -> bool:
+        """Heuristic for a batch whose translations no longer match its cues.
+
+        Models that lose sync while generating a long response tend to keep the
+        object count but pad the tail by repeating one translation.  Three or
+        more consecutive cues with an identical translation while the source
+        texts differ is therefore treated as a misaligned batch.
+        """
+        streak_sources: List[str] = []
+        streak_text: Optional[str] = None
+        for cue in cues:
+            text = translations.get(cue.id)
+            if not text:
+                streak_sources, streak_text = [], None
+                continue
+            source = cue.text.strip()
+            if streak_text is not None and text == streak_text:
+                streak_sources.append(source)
+                if len(streak_sources) >= 3 and any(
+                    streak_sources[i] != streak_sources[i - 1]
+                    for i in range(1, len(streak_sources))
+                ):
+                    return True
+            else:
+                streak_sources = [source]
+                streak_text = text
+        return False
+
     def translate_cues(self, cues: Sequence[Cue]) -> Dict[int, str]:
         translations: Dict[int, str] = {}
         pending = [cue for cue in cues if cue.text.strip()]
         if not pending:
             return translations
-        self._log("info", f"提交整文件翻译请求：{len(pending)} 条字幕")
-        left = self._translate_pending(pending, translations)
-        if left:
-            self.result.chunked += 1
+        batches = list(_iter_chunks(pending, self.chunk_size))
+        self._log(
+            "info",
+            f"提交分批翻译请求：{len(pending)} 条字幕，共 {len(batches)} 批"
+            f"（每批最多 {self.chunk_size} 条）",
+        )
+        for index, batch in enumerate(batches, start=1):
+            self._log("info", f"翻译第 {index}/{len(batches)} 批（{len(batch)} 条字幕）...")
+            self._translate_batch(batch, translations)
+        return translations
+
+    def _translate_batch(
+        self,
+        batch: Sequence[Cue],
+        translations: Dict[int, str],
+        depth: int = 0,
+    ) -> None:
+        """Translate one batch, then validate and repair it.
+
+        Missing ids are re-translated in smaller batches; a batch whose
+        translations look misaligned is discarded and translated again in
+        smaller pieces.  Retries only recurse one level deep: after that the
+        partial result is kept instead of dropping translations.
+        """
+        left = self._translate_pending(batch, translations)
+        suspicious = self._looks_misaligned(batch, translations)
+        if not left and not suspicious:
+            return
+
+        self.result.chunked += 1
+        if depth >= 1:
+            if left:
+                self._log("warning", f"仍有 {len(left)} 条未翻译，已保留原文")
+            if suspicious:
+                self._log("warning", f"本批 {len(batch)} 条译文疑似串位，请检查该文件")
+            return
+
+        if suspicious:
             self._log(
                 "warning",
-                f"整文件翻译不完整，剩余 {len(left)} 条回退为分块翻译（每块 {self.chunk_size} 条）",
+                f"本批 {len(batch)} 条译文疑似串位（模型可能合并了相邻字幕），"
+                f"缩小批次重新翻译",
             )
-            for chunk in _iter_chunks(left, self.chunk_size):
-                self._translate_pending(chunk, translations)
-        return translations
+            for cue in batch:
+                translations.pop(cue.id, None)
+            targets = list(batch)
+        else:
+            self._log("warning", f"本批仍有 {len(left)} 条未翻译，缩小批次补译")
+            targets = list(left)
+
+        sub_size = max(1, len(targets) // 4)
+        if sub_size >= len(targets):
+            sub_size = max(1, len(targets) // 2)
+        for sub in _iter_chunks(targets, sub_size):
+            self._translate_batch(sub, translations, depth + 1)
 
     def translate_document(self, doc: SrtDocument) -> TranslationResult:
         started = time.time()
@@ -533,7 +614,7 @@ class SubtitleTranslator:
             "翻译完成："
             f"总条目 {self.result.total}，已翻译 {self.result.translated}，"
             f"未翻译 {self.result.unrecovered}，请求 {self.result.requests} 次，"
-            f"补译 {self.result.repaired} 轮，分块 {self.result.chunked} 次，"
+            f"补译 {self.result.repaired} 轮，批次校验重试 {self.result.chunked} 次，"
             f"token: prompt {self.result.prompt_tokens} / completion {self.result.completion_tokens}，"
             f"耗时 {self.result.elapsed:.2f} 秒",
         )

@@ -271,8 +271,8 @@ class AiSubV2PluginConfigTest(unittest.TestCase):
         self.plugin = plugin_module.AiSubV2()
 
     # -- 1. version -------------------------------------------------------
-    def test_plugin_version_is_2_6(self):
-        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.6")
+    def test_plugin_version_is_2_7(self):
+        self.assertEqual(plugin_module.AiSubV2.plugin_version, "2.7")
 
     # -- 2. defaults + removed keys --------------------------------------
     def test_get_form_defaults_and_removed_keys(self):

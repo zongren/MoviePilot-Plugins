@@ -101,7 +101,7 @@ class AiSubV2(_PluginBase):
     # 主题色
     plugin_color = "#2C4F7E"
     # 插件版本
-    plugin_version = "2.6"
+    plugin_version = "2.7"
     # 插件作者
     plugin_author = "TimoYoung"
     # 作者主页
@@ -849,14 +849,14 @@ class AiSubV2(_PluginBase):
 
     def __translate_zh_subtitle(self, source_lang: str, source_subtitle: str, dest_subtitle: str):
         """
-        使用大模型整文件翻译字幕为中文
+        使用大模型分批翻译字幕为中文
 
         :param source_lang: 源字幕语言（仅用于日志）
         :param source_subtitle: 源字幕文件路径
         :param dest_subtitle: 目标字幕文件路径
         :return: TranslationResult
         """
-        logger.info(f"整文件翻译：{source_subtitle} -> {dest_subtitle}（源语言 {source_lang}）")
+        logger.info(f"分批翻译：{source_subtitle} -> {dest_subtitle}（源语言 {source_lang}）")
         translator = SubtitleTranslator(
             provider=self._llm_provider,
             zh_only=self._zh_only,
@@ -1427,8 +1427,8 @@ class AiSubV2(_PluginBase):
                                                                 'props': {
                                                                     'type': 'info',
                                                                     'variant': 'tonal',
-                                                                    'text': '按字幕序号整文件翻译，时间轴原样保留；'
-                                                                            '响应被截断时自动补译并回退为分块翻译。'
+                                                                    'text': '按字幕序号分批翻译，时间轴原样保留；'
+                                                                            '批次缺条自动补译，疑似串位时缩小批次重译。'
                                                                 }
                                                             }
                                                         ]

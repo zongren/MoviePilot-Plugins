@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Standalone CLI for the AiSubV2 whole-file SRT translator.
+"""Standalone CLI for the AiSubV2 batched SRT translator.
 
 Runs the exact same engine the MoviePilot plugin uses, without MoviePilot::
 
@@ -90,7 +90,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--effort", choices=["low", "high", "max"], default="high")
     parser.add_argument("--max-tokens", type=int, default=64000)
     parser.add_argument("--max-retries", type=int, default=3)
-    parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE)
+    parser.add_argument("--chunk-size", type=int, default=CHUNK_SIZE,
+                        help="每批最多多少条字幕（默认 %(default)s）")
     parser.add_argument("--timeout", type=int, default=900)
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--zh-only", action="store_true", help="只输出中文译文")
@@ -154,7 +155,7 @@ def main(argv=None) -> int:
     print(
         "统计："
         f"总条目={result.total} 已翻译={result.translated} 未翻译={result.unrecovered} "
-        f"请求={result.requests} 补译轮={result.repaired} 分块={result.chunked} "
+        f"请求={result.requests} 补译轮={result.repaired} 批次重试={result.chunked} "
         f"prompt_tokens={result.prompt_tokens} completion_tokens={result.completion_tokens} "
         f"耗时={elapsed:.1f}s"
     )
